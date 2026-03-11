@@ -75,12 +75,34 @@ static dmabuf8_t s_dma_8 = {
 // trace related variables
 static uint32_t s_trace_len = 0;
 static bool s_tracing = true;
+static uint32_t s_trace_budget_bytes = 0;
+static uint16_t s_trace_reserve_bytes = 0;
+static bool s_trace_saturated = false;
+static uint32_t s_trace_dropped_records = 0;
+static uint32_t s_trace_dropped_bytes = 0;
+
+void BigBuf_reset_trace_limits(void);
+
+static uint32_t BigBuf_get_trace_limit(void) {
+    uint32_t max_trace_len = BigBuf_max_traceLen();
+    if (s_trace_reserve_bytes >= max_trace_len) {
+        return 0;
+    }
+
+    max_trace_len -= s_trace_reserve_bytes;
+    if (s_trace_budget_bytes != 0 && s_trace_budget_bytes < max_trace_len) {
+        return s_trace_budget_bytes;
+    }
+
+    return max_trace_len;
+}
 
 // compute the available size for BigBuf
 void BigBuf_initialize(void) {
     s_bigbuf_size = (uint32_t)_stack_start - (uint32_t)__bss_end__;
     s_bigbuf_hi = s_bigbuf_size;
     s_trace_len = 0;
+    BigBuf_reset_trace_limits();
 }
 
 // get the address of BigBuf
@@ -120,6 +142,7 @@ void BigBuf_Clear(void) {
 void BigBuf_Clear_ext(bool verbose) {
     memset(BigBuf, 0, s_bigbuf_size);
     clear_trace();
+    BigBuf_reset_trace_limits();
     if (verbose) {
         if (g_dbglevel >= DBG_ERROR) Dbprintf("Buffer cleared (%i bytes)", s_bigbuf_size);
     }
@@ -208,6 +231,38 @@ void BigBuf_print_status(void) {
     }
 }
 
+void BigBuf_set_trace_limits(uint32_t budget_bytes, uint16_t reserve_bytes) {
+    s_trace_budget_bytes = budget_bytes;
+    s_trace_reserve_bytes = reserve_bytes;
+    s_trace_saturated = false;
+    s_trace_dropped_records = 0;
+    s_trace_dropped_bytes = 0;
+}
+
+void BigBuf_disable_trace_limits(void) {
+    s_trace_budget_bytes = 0;
+    s_trace_reserve_bytes = 0;
+}
+
+void BigBuf_reset_trace_limits(void) {
+    BigBuf_disable_trace_limits();
+    s_trace_saturated = false;
+    s_trace_dropped_records = 0;
+    s_trace_dropped_bytes = 0;
+}
+
+bool BigBuf_trace_saturated(void) {
+    return s_trace_saturated;
+}
+
+uint32_t BigBuf_get_trace_dropped_records(void) {
+    return s_trace_dropped_records;
+}
+
+uint32_t BigBuf_get_trace_dropped_bytes(void) {
+    return s_trace_dropped_bytes;
+}
+
 // return the maximum trace length (i.e. the unallocated size of BigBuf)
 uint16_t BigBuf_max_traceLen(void) {
     return s_bigbuf_hi & BIGBUF_ALIGN_MASK;
@@ -215,6 +270,9 @@ uint16_t BigBuf_max_traceLen(void) {
 
 void clear_trace(void) {
     s_trace_len = 0;
+    s_trace_saturated = false;
+    s_trace_dropped_records = 0;
+    s_trace_dropped_bytes = 0;
 }
 
 void set_tracelen(uint32_t value) {
@@ -257,9 +315,12 @@ bool RAMFUNC LogTrace(const uint8_t *btBytes, uint16_t iLen, uint32_t timestamp_
     const uint16_t num_paritybytes = (iLen - 1) / 8 + 1;
 
     // Disable tracing and return when trace is full
-    const uint32_t max_trace_len = BigBuf_max_traceLen();
+    const uint32_t max_trace_len = BigBuf_get_trace_limit();
     const uint32_t trace_entry_len = TRACELOG_HDR_LEN + iLen + num_paritybytes;
     if (s_trace_len >= max_trace_len || trace_entry_len >= max_trace_len - s_trace_len) {
+        s_trace_saturated = true;
+        s_trace_dropped_records++;
+        s_trace_dropped_bytes += trace_entry_len;
         s_tracing = false;
         return false;
     }

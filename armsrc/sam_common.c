@@ -163,6 +163,10 @@ int sam_send_payload(
 ) {
     int res = PM3_SUCCESS;
 
+    if (response == NULL || response_len == NULL) {
+        return PM3_EMALLOC;
+    }
+
     uint8_t *buf = response;
 
     buf[0] = 0xA0; // CLA
@@ -235,13 +239,21 @@ int sam_get_version(bool info) {
     };
     uint16_t payload_len = sizeof(payload);
 
-    sam_send_payload(
+    if (response == NULL) {
+        res = PM3_EMALLOC;
+        goto out;
+    }
+
+    res = sam_send_payload(
         0x44, 0x0a, 0x44,
         payload,
         &payload_len,
         response,
         &response_len
     );
+    if (res != PM3_SUCCESS) {
+        goto out;
+    }
 
     // resp:
     // c1 64 00 00 00
@@ -316,13 +328,21 @@ int sam_get_serial_number(void) {
     };
     uint16_t payload_len = sizeof(payload);
 
-    sam_send_payload(
+    if (response == NULL) {
+        res = PM3_EMALLOC;
+        goto out;
+    }
+
+    res = sam_send_payload(
         0x44, 0x0a, 0x44,
         payload,
         &payload_len,
         response,
         &response_len
     );
+    if (res != PM3_SUCCESS) {
+        goto out;
+    }
 
     //resp:
     //c1 64 00 00 00
@@ -430,13 +450,15 @@ void sam_send_ack(void) {
     uint8_t payload[] = { 0xa0, 0 };
     uint16_t payload_len = sizeof(payload);
 
-    sam_send_payload(
-        0x44, 0x0a, 0x00,
-        payload,
-        &payload_len,
-        response,
-        &response_len
-    );
+    if (response != NULL) {
+        sam_send_payload(
+            0x44, 0x0a, 0x00,
+            payload,
+            &payload_len,
+            response,
+            &response_len
+        );
+    }
 
     BigBuf_free();
 }

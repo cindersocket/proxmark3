@@ -1132,14 +1132,14 @@ int CmdHF14ASniff(const char *Cmd) {
     return PM3_SUCCESS;
 }
 
-int ExchangeRAW14a(uint8_t *datain, int datainlen, bool activateField, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, bool silentMode) {
+int ExchangeRAW14aEx(uint8_t *datain, int datainlen, bool activateField, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, bool silentMode, uint32_t extraFlags) {
 
     uint16_t cmdc = 0;
     *dataoutlen = 0;
 
     if (activateField) {
         // select with no disconnect and set gs_frame_len
-        int selres = SelectCard14443A_4(false, !silentMode, NULL);
+        int selres = SelectCard14443A_4_Ex(false, !silentMode, NULL, extraFlags);
         gs_frames_num = 0;
         if (selres != PM3_SUCCESS) {
             return selres;
@@ -1155,7 +1155,7 @@ int ExchangeRAW14a(uint8_t *datain, int datainlen, bool activateField, bool leav
 
     int min = MIN((PM3_CMD_DATA_SIZE - 2), (datainlen & 0x1FF));
     memcpy(&data[2], datain, min);
-    SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_RAW | ISO14A_APPEND_CRC | cmdc, (datainlen & 0xFFFF) + 2, 0, data, min + 2);
+    SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_RAW | ISO14A_APPEND_CRC | cmdc | extraFlags, (datainlen & 0xFFFF) + 2, 0, data, min + 2);
 
     uint8_t *recv;
     PacketResponseNG resp;
@@ -1209,7 +1209,11 @@ int ExchangeRAW14a(uint8_t *datain, int datainlen, bool activateField, bool leav
     return PM3_SUCCESS;
 }
 
-int SelectCard14443A_4_WithParameters(bool disconnect, bool verbose, iso14a_card_select_t *card, iso14a_polling_parameters_t *polling_parameters) {
+int ExchangeRAW14a(uint8_t *datain, int datainlen, bool activateField, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, bool silentMode) {
+    return ExchangeRAW14aEx(datain, datainlen, activateField, leaveSignalON, dataout, maxdataoutlen, dataoutlen, silentMode, 0);
+}
+
+static int SelectCard14443A_4_WithParameters_Ex(bool disconnect, bool verbose, iso14a_card_select_t *card, iso14a_polling_parameters_t *polling_parameters, uint32_t extraFlags) {
     // global vars should be prefixed with g_
     gs_frame_len = 0;
     gs_frames_num = 0;
@@ -1223,9 +1227,9 @@ int SelectCard14443A_4_WithParameters(bool disconnect, bool verbose, iso14a_card
     // Anticollision + SELECT card
     PacketResponseNG resp;
     if (polling_parameters != NULL) {
-        SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_CONNECT | ISO14A_NO_DISCONNECT | ISO14A_USE_CUSTOM_POLLING, 0, 0, (uint8_t *)polling_parameters, sizeof(iso14a_polling_parameters_t));
+        SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_CONNECT | ISO14A_NO_DISCONNECT | ISO14A_USE_CUSTOM_POLLING | extraFlags, 0, 0, (uint8_t *)polling_parameters, sizeof(iso14a_polling_parameters_t));
     } else {
-        SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_CONNECT | ISO14A_NO_DISCONNECT, 0, 0, NULL, 0);
+        SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_CONNECT | ISO14A_NO_DISCONNECT | extraFlags, 0, 0, NULL, 0);
     }
 
     if (WaitForResponseTimeout(CMD_ACK, &resp, 2000) == false) {
@@ -1254,7 +1258,7 @@ int SelectCard14443A_4_WithParameters(bool disconnect, bool verbose, iso14a_card
     if (resp.oldarg[0] == 2) { // 0: couldn't read, 1: OK, with ATS, 2: OK, no ATS, 3: proprietary Anticollision
         // get ATS
         uint8_t rats[] = { 0xE0, 0x80 }; // FSDI=8 (FSD=256), CID=0
-        SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_RAW | ISO14A_APPEND_CRC | ISO14A_NO_DISCONNECT, sizeof(rats), 0, rats, sizeof(rats));
+        SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_RAW | ISO14A_APPEND_CRC | ISO14A_NO_DISCONNECT | extraFlags, sizeof(rats), 0, rats, sizeof(rats));
         if (WaitForResponseTimeout(CMD_ACK, &resp, 1500) == false) {
             PrintAndLogEx(WARNING, "command execution time out");
             return PM3_ETIMEOUT;
@@ -1298,18 +1302,26 @@ int SelectCard14443A_4_WithParameters(bool disconnect, bool verbose, iso14a_card
     return PM3_SUCCESS;
 }
 
-int SelectCard14443A_4(bool disconnect, bool verbose, iso14a_card_select_t *card) {
-    return SelectCard14443A_4_WithParameters(disconnect, verbose, card, NULL);
+int SelectCard14443A_4_WithParameters(bool disconnect, bool verbose, iso14a_card_select_t *card, iso14a_polling_parameters_t *polling_parameters) {
+    return SelectCard14443A_4_WithParameters_Ex(disconnect, verbose, card, polling_parameters, 0);
 }
 
-static int CmdExchangeAPDU(bool chainingin, const uint8_t *datain, int datainlen, bool activateField, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, bool *chainingout) {
+int SelectCard14443A_4_Ex(bool disconnect, bool verbose, iso14a_card_select_t *card, uint32_t extraFlags) {
+    return SelectCard14443A_4_WithParameters_Ex(disconnect, verbose, card, NULL, extraFlags);
+}
+
+int SelectCard14443A_4(bool disconnect, bool verbose, iso14a_card_select_t *card) {
+    return SelectCard14443A_4_Ex(disconnect, verbose, card, 0);
+}
+
+static int CmdExchangeAPDU(bool chainingin, const uint8_t *datain, int datainlen, bool activateField, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, bool *chainingout, uint32_t extraFlags) {
     *chainingout = false;
 
     size_t timeout = 1500;
     if (activateField) {
         // select with no disconnect and set gs_frame_len
         iso14a_card_select_t card;
-        int selres = SelectCard14443A_4(false, true, &card);
+        int selres = SelectCard14443A_4_Ex(false, true, &card, extraFlags);
         if (selres != PM3_SUCCESS) {
             return selres;
         }
@@ -1349,6 +1361,7 @@ static int CmdExchangeAPDU(bool chainingin, const uint8_t *datain, int datainlen
     if (chainingin) {
         cmdc |= ISO14A_SEND_CHAINING;
     }
+    cmdc |= extraFlags;
 
     // "Command APDU" length should be 5+255+1, but javacard's APDU buffer might be smaller - 133 bytes
     // https://stackoverflow.com/questions/32994936/safe-max-java-card-apdu-data-command-and-respond-size
@@ -1427,7 +1440,7 @@ static int CmdExchangeAPDU(bool chainingin, const uint8_t *datain, int datainlen
     return PM3_SUCCESS;
 }
 
-int ExchangeAPDU14a(const uint8_t *datain, int datainlen, bool activateField, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen) {
+int ExchangeAPDU14aEx(const uint8_t *datain, int datainlen, bool activateField, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, uint32_t extraFlags) {
     *dataoutlen = 0;
     bool chaining = false;
     int res;
@@ -1445,7 +1458,7 @@ int ExchangeAPDU14a(const uint8_t *datain, int datainlen, bool activateField, bo
             bool chainBlockNotLast = ((clen + vlen) < datainlen);
 
             *dataoutlen = 0;
-            res = CmdExchangeAPDU(chainBlockNotLast, &datain[clen], vlen, vActivateField, dataout, maxdataoutlen, dataoutlen, &chaining);
+            res = CmdExchangeAPDU(chainBlockNotLast, &datain[clen], vlen, vActivateField, dataout, maxdataoutlen, dataoutlen, &chaining, extraFlags);
             if (res != PM3_SUCCESS) {
                 if (leaveSignalON == false) {
                     DropField();
@@ -1474,7 +1487,7 @@ int ExchangeAPDU14a(const uint8_t *datain, int datainlen, bool activateField, bo
         } while (clen < datainlen);
 
     } else {
-        res = CmdExchangeAPDU(false, datain, datainlen, activateField, dataout, maxdataoutlen, dataoutlen, &chaining);
+        res = CmdExchangeAPDU(false, datain, datainlen, activateField, dataout, maxdataoutlen, dataoutlen, &chaining, extraFlags);
         if (res != PM3_SUCCESS) {
             if (leaveSignalON == false) {
                 DropField();
@@ -1485,7 +1498,7 @@ int ExchangeAPDU14a(const uint8_t *datain, int datainlen, bool activateField, bo
 
     while (chaining) {
         // I-block with chaining
-        res = CmdExchangeAPDU(false, NULL, 0, false, &dataout[*dataoutlen], maxdataoutlen, dataoutlen, &chaining);
+        res = CmdExchangeAPDU(false, NULL, 0, false, &dataout[*dataoutlen], maxdataoutlen, dataoutlen, &chaining, extraFlags);
         if (res != PM3_SUCCESS) {
             if (leaveSignalON == false) {
                 DropField();
@@ -1499,6 +1512,10 @@ int ExchangeAPDU14a(const uint8_t *datain, int datainlen, bool activateField, bo
     }
 
     return PM3_SUCCESS;
+}
+
+int ExchangeAPDU14a(const uint8_t *datain, int datainlen, bool activateField, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen) {
+    return ExchangeAPDU14aEx(datain, datainlen, activateField, leaveSignalON, dataout, maxdataoutlen, dataoutlen, 0);
 }
 
 // ISO14443-4. 7. Half-duplex block transmission protocol
@@ -1525,6 +1542,7 @@ static int CmdHF14AAPDU(const char *Cmd) {
         arg_param_begin,
         arg_lit0("s",  "select",   "activate field and select card"),
         arg_lit0("k",  "keep",     "keep signal field ON after receive"),
+        arg_lit0(NULL, "no-trace", "disable PM3 trace for this session"),
         arg_lit0("t",  "tlv",      "decode TLV"),
         arg_lit0(NULL, "decode",   "decode APDU request"),
         arg_str0("m",  "make",     "<hex>", "APDU header, 4 bytes <CLA INS P1 P2>"),
@@ -1537,12 +1555,13 @@ static int CmdHF14AAPDU(const char *Cmd) {
 
     bool activateField = arg_get_lit(ctx, 1);
     bool leaveSignalON = arg_get_lit(ctx, 2);
-    bool decodeTLV = arg_get_lit(ctx, 3);
-    bool decodeAPDU = arg_get_lit(ctx, 4);
+    bool noTrace = arg_get_lit(ctx, 3);
+    bool decodeTLV = arg_get_lit(ctx, 4);
+    bool decodeAPDU = arg_get_lit(ctx, 5);
 
     uint8_t header[PM3_CMD_DATA_SIZE];
     int headerlen = 0;
-    CLIGetHexWithReturn(ctx, 5, header, &headerlen);
+    CLIGetHexWithReturn(ctx, 6, header, &headerlen);
 
     bool makeAPDU = (headerlen > 0);
 
@@ -1552,8 +1571,8 @@ static int CmdHF14AAPDU(const char *Cmd) {
         return PM3_EINVARG;
     }
 
-    bool extendedAPDU = arg_get_lit(ctx, 6);
-    int le = arg_get_int_def(ctx, 7, 0);
+    bool extendedAPDU = arg_get_lit(ctx, 7);
+    int le = arg_get_int_def(ctx, 8, 0);
 
     uint8_t data[PM3_CMD_DATA_SIZE];
     int datalen = 0;
@@ -1562,7 +1581,7 @@ static int CmdHF14AAPDU(const char *Cmd) {
         uint8_t apdudata[PM3_CMD_DATA_SIZE] = {0};
         int apdudatalen = 0;
 
-        CLIGetHexBLessWithReturn(ctx, 8, apdudata, &apdudatalen, 1 + 2);
+        CLIGetHexBLessWithReturn(ctx, 9, apdudata, &apdudatalen, 1 + 2);
 
         APDU_t apdu;
         apdu.cla = header[0];
@@ -1595,7 +1614,7 @@ static int CmdHF14AAPDU(const char *Cmd) {
         }
 
         // len = data + PCB(1b) + CRC(2b)
-        CLIGetHexBLessWithReturn(ctx, 8, data, &datalen, 1 + 2);
+        CLIGetHexBLessWithReturn(ctx, 9, data, &datalen, 1 + 2);
     }
     CLIParserFree(ctx);
 
@@ -1615,7 +1634,8 @@ static int CmdHF14AAPDU(const char *Cmd) {
             PrintAndLogEx(WARNING, "can't decode APDU.");
     }
 
-    int res = ExchangeAPDU14a(data, datalen, activateField, leaveSignalON, data, PM3_CMD_DATA_SIZE, &datalen);
+    uint32_t extraFlags = noTrace ? ISO14A_NO_TRACE : 0;
+    int res = ExchangeAPDU14aEx(data, datalen, activateField, leaveSignalON, data, PM3_CMD_DATA_SIZE, &datalen, extraFlags);
     if (res != PM3_SUCCESS)
         return res;
 
@@ -1648,6 +1668,7 @@ static int CmdHF14ACmdRaw(const char *Cmd) {
         arg_lit0("a",  NULL,              "Active signal field ON without select"),
         arg_lit0("c",  NULL,              "Calculate and append CRC"),
         arg_lit0("k",  NULL,              "Keep signal field ON after receive"),
+        arg_lit0(NULL, "no-trace",        "disable PM3 trace for this session"),
         arg_lit0("3",  NULL,              "ISO14443-3 select only (skip RATS)"),
         arg_lit0("r",  NULL,              "Do not read response"),
         arg_lit0("s",  NULL,              "Active signal field ON with select"),
@@ -1666,20 +1687,21 @@ static int CmdHF14ACmdRaw(const char *Cmd) {
     bool active = arg_get_lit(ctx, 1);
     bool crc = arg_get_lit(ctx, 2);
     bool keep_field_on = arg_get_lit(ctx, 3);
-    bool no_rats =  arg_get_lit(ctx, 4);
-    bool reply = (arg_get_lit(ctx, 5) == false);
-    bool active_select = arg_get_lit(ctx, 6);
-    uint32_t timeout = (uint32_t)arg_get_int_def(ctx, 7, 0);
-    uint16_t numbits = (uint16_t)arg_get_int_def(ctx, 8, 0);
-    bool verbose = arg_get_lit(ctx, 9);
-    uint32_t wait_us = (uint32_t)arg_get_int_def(ctx, 10, 0);
-    bool topazmode = arg_get_lit(ctx, 11);
-    bool crypto1mode = arg_get_lit(ctx, 12);
-    bool use_schann = arg_get_lit(ctx, 13);
+    bool no_trace = arg_get_lit(ctx, 4);
+    bool no_rats =  arg_get_lit(ctx, 5);
+    bool reply = (arg_get_lit(ctx, 6) == false);
+    bool active_select = arg_get_lit(ctx, 7);
+    uint32_t timeout = (uint32_t)arg_get_int_def(ctx, 8, 0);
+    uint16_t numbits = (uint16_t)arg_get_int_def(ctx, 9, 0);
+    bool verbose = arg_get_lit(ctx, 10);
+    uint32_t wait_us = (uint32_t)arg_get_int_def(ctx, 11, 0);
+    bool topazmode = arg_get_lit(ctx, 12);
+    bool crypto1mode = arg_get_lit(ctx, 13);
+    bool use_schann = arg_get_lit(ctx, 14);
 
     int datalen = 0;
     uint8_t data[PM3_CMD_DATA_SIZE_MIX] = {0};
-    CLIGetHexWithReturn(ctx, 14, data, &datalen);
+    CLIGetHexWithReturn(ctx, 15, data, &datalen);
     CLIParserFree(ctx);
 
     bool bTimeout = (timeout) ? true : false;
@@ -1760,6 +1782,10 @@ static int CmdHF14ACmdRaw(const char *Cmd) {
 
     if (no_rats) {
         flags |= ISO14A_NO_RATS;
+    }
+
+    if (no_trace) {
+        flags |= ISO14A_NO_TRACE;
     }
 
     // Max buffer is PM3_CMD_DATA_SIZE_MIX

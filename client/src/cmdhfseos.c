@@ -1992,6 +1992,7 @@ static int CmdHfSeosSAM(const char *Cmd) {
         arg_lit0("v", "verbose", "verbose output"),
         arg_lit0("k", "keep", "keep the field active after command executed"),
         arg_lit0("n", "nodetect", "skip selecting the card and sending card details to SAM"),
+        arg_lit0(NULL, "no-trace", "disable PM3 trace for this session"),
         arg_lit0("t",  "tlv",      "decode TLV"),
         arg_strx0("d", "data",     "<hex>", "DER encoded command to send to SAM"),
         arg_param_end
@@ -2001,7 +2002,8 @@ static int CmdHfSeosSAM(const char *Cmd) {
     bool verbose = arg_get_lit(ctx, 1);
     bool disconnectAfter = !arg_get_lit(ctx, 2);
     bool skipDetect = arg_get_lit(ctx, 3);
-    bool decodeTLV = arg_get_lit(ctx, 4);
+    bool noTrace = arg_get_lit(ctx, 4);
+    bool decodeTLV = arg_get_lit(ctx, 5);
 
     uint8_t flags = 0;
     if (disconnectAfter) {
@@ -2012,11 +2014,15 @@ static int CmdHfSeosSAM(const char *Cmd) {
         flags |= BITMASK(1);
     }
 
+    if (noTrace) {
+        flags |= BITMASK(2);
+    }
+
     uint8_t data[PM3_CMD_DATA_SIZE] = {0};
     data[0] = flags;
 
     int cmdlen = 0;
-    if (CLIParamHexToBuf(arg_get_str(ctx, 5), data + 1, PM3_CMD_DATA_SIZE - 1, &cmdlen) != PM3_SUCCESS) {
+    if (CLIParamHexToBuf(arg_get_str(ctx, 6), data + 1, PM3_CMD_DATA_SIZE - 1, &cmdlen) != PM3_SUCCESS) {
         CLIParserFree(ctx);
         return PM3_ESOFT;
     }
@@ -2043,6 +2049,10 @@ static int CmdHfSeosSAM(const char *Cmd) {
         }
         case PM3_ENOPACS: {
             PrintAndLogEx(SUCCESS, "No PACS data found. Card empty?");
+            return resp.status;
+        }
+        case PM3_EMALLOC: {
+            PrintAndLogEx(WARNING, "SEOS SAM session ran out of PM3 buffer memory");
             return resp.status;
         }
         default: {
@@ -2130,4 +2140,3 @@ int CmdHFSeos(const char *Cmd) {
     clearCommandBuffer();
     return CmdsParse(CommandTable, Cmd);
 }
-

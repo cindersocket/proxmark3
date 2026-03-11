@@ -46,11 +46,13 @@ end
 reg [11:0] addr;
 reg [11:0] start_addr;
 reg [2:0] previous_major_mode;
+reg previous_trace_enable;
 reg write_enable1;
 reg write_enable2;
 always @(negedge ck_1356megb)
 begin
     previous_major_mode <= major_mode;
+    previous_trace_enable <= trace_enable;
     if (major_mode == `FPGA_MAJOR_MODE_HF_GET_TRACE)
     begin
         write_enable1 <= 1'b0;
@@ -67,6 +69,12 @@ begin
     end
     else if (major_mode != `FPGA_MAJOR_MODE_OFF)
     begin
+        if (!trace_enable && previous_trace_enable)
+        begin
+            write_enable1 <= 1'b0;
+            write_enable2 <= 1'b0;
+            start_addr <= addr;
+        end
         if (trace_enable)
         begin
             if (addr[11] == 1'b0)
@@ -97,7 +105,6 @@ begin
         begin
             write_enable1 <= 1'b0;
             write_enable2 <= 1'b0;
-            start_addr <= addr;
         end
     end
     else // major_mode == `FPGA_MAJOR_MODE_OFF

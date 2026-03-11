@@ -38,6 +38,30 @@
 #define SDA_read ((AT91C_BASE_PIOA->PIO_PDSR & GPIO_SDA) == GPIO_SDA)
 
 #define I2C_ERROR  "I2C_WaitAck Error"
+#define SMARTCARD_TRACE_RESERVE_BYTES 1024
+
+static void smartcard_configure_trace(smartcard_command_t flags) {
+    if ((flags & SC_NO_TRACE) == SC_NO_TRACE) {
+        BigBuf_disable_trace_limits();
+        set_tracing(false);
+        return;
+    }
+
+    if ((flags & SC_LOG) == SC_LOG) {
+        uint32_t trace_budget = BigBuf_max_traceLen();
+        if (trace_budget > SMARTCARD_TRACE_RESERVE_BYTES) {
+            trace_budget -= SMARTCARD_TRACE_RESERVE_BYTES;
+        } else {
+            trace_budget = 0;
+        }
+        BigBuf_set_trace_limits(trace_budget, SMARTCARD_TRACE_RESERVE_BYTES);
+        set_tracing(true);
+        return;
+    }
+
+    BigBuf_disable_trace_limits();
+    set_tracing(false);
+}
 
 // Direct use the loop to delay. 6 instructions loop, Masterclock 48MHz,
 // delay=1 is about 200kbps
@@ -840,6 +864,7 @@ bool GetATR(smart_card_atr_t *card_ptr, bool verbose) {
 
 void SmartCardAtr(void) {
     LED_D_ON();
+    BigBuf_set_trace_limits(BigBuf_max_traceLen(), 0);
     set_tracing(true);
     I2C_Reset_EnterMainProgram();
     smart_card_atr_t card;
@@ -848,6 +873,7 @@ void SmartCardAtr(void) {
     } else {
         reply_ng(CMD_SMART_ATR, PM3_ETIMEOUT, NULL, 0);
     }
+    BigBuf_disable_trace_limits();
     set_tracing(false);
     LEDsoff();
 //    StopTicks();
@@ -858,16 +884,17 @@ void SmartCardRaw(const smart_card_raw_t *p) {
 
     uint16_t len = 0;
     uint8_t *resp = BigBuf_calloc(ISO7816_MAX_FRAME);
-    // check if alloacted...
     smartcard_command_t flags = p->flags;
 
     if ((flags & SC_CLEARLOG) == SC_CLEARLOG)
         clear_trace();
 
-    if ((flags & SC_LOG) == SC_LOG)
-        set_tracing(true);
-    else
-        set_tracing(false);
+    smartcard_configure_trace(flags);
+
+    if (resp == NULL) {
+        reply_ng(CMD_SMART_RAW, PM3_EMALLOC, NULL, 0);
+        goto OUT;
+    }
 
     if ((flags & SC_CONNECT) == SC_CONNECT) {
 
@@ -920,6 +947,7 @@ void SmartCardRaw(const smart_card_raw_t *p) {
 
 OUT:
     BigBuf_free();
+    BigBuf_disable_trace_limits();
     set_tracing(false);
     LEDsoff();
 }

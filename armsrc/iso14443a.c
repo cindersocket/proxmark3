@@ -3506,6 +3506,10 @@ b5,b6 = 00 - DESELECT
 */
 int iso14_apdu(uint8_t *cmd, uint16_t cmd_len, bool send_chaining, void *data, uint16_t data_len, uint8_t *res) {
     uint8_t *real_cmd = BigBuf_calloc(cmd_len + 4);
+    if (real_cmd == NULL) {
+        BigBuf_free();
+        return PM3_EMALLOC;
+    }
 
     if (cmd_len) {
         // ISO 14443 APDU frame: PCB [CID] [NAD] APDU CRC PCB=0x02
@@ -3615,6 +3619,7 @@ int iso14_apdu(uint8_t *cmd, uint16_t cmd_len, bool send_chaining, void *data, u
 //             low  ::  len of commandbytes
 // arg2         timeout
 // d.asBytes command bytes to send
+#define ISO14A_TRACE_RESERVE_BYTES 1024
 void ReaderIso14443a(PacketCommandNG *c) {
     iso14a_command_t param = c->oldarg[0];
     size_t len = c->oldarg[1] & 0xffff;
@@ -3628,10 +3633,27 @@ void ReaderIso14443a(PacketCommandNG *c) {
 
     if ((param & ISO14A_CONNECT) == ISO14A_CONNECT) {
         iso14_pcb_blocknum = 0;
-        clear_trace();
+        if ((param & ISO14A_NO_TRACE) == ISO14A_NO_TRACE) {
+            BigBuf_disable_trace_limits();
+            set_tracing(false);
+            FpgaDisableTracing();
+        } else {
+            clear_trace();
+            uint32_t trace_budget = BigBuf_max_traceLen();
+            if (trace_budget > ISO14A_TRACE_RESERVE_BYTES) {
+                trace_budget -= ISO14A_TRACE_RESERVE_BYTES;
+            } else {
+                trace_budget = 0;
+            }
+            BigBuf_set_trace_limits(trace_budget, ISO14A_TRACE_RESERVE_BYTES);
+            set_tracing(true);
+        }
+    } else if ((param & ISO14A_NO_TRACE) == ISO14A_NO_TRACE) {
+        set_tracing(false);
+        FpgaDisableTracing();
+    } else {
+        set_tracing(true);
     }
-
-    set_tracing(true);
 
     if ((param & ISO14A_REQUEST_TRIGGER) == ISO14A_REQUEST_TRIGGER) {
         iso14a_set_trigger(true);
@@ -3846,6 +3868,8 @@ OUT:
 
     crypto1_auth_state = AUTH_FIRST;
     hf_field_off();
+    FpgaDisableTracing();
+    BigBuf_disable_trace_limits();
     set_tracing(false);
 }
 

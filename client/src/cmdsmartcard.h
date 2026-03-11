@@ -31,5 +31,6 @@ int CmdSmartcard(const char *Cmd);
 
 bool smart_select(bool verbose, smart_card_atr_t *atr);
 int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCard, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen);
+int ExchangeAPDUSCEx(bool verbose, uint8_t *datain, int datainlen, bool activateCard, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, uint16_t extraFlags);
 
 #endif

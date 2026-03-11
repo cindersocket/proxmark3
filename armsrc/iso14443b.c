@@ -2391,10 +2391,22 @@ int read_14b_srx_block(uint8_t blocknr, uint8_t *block) {
 void read_14b_st_block(uint8_t blocknr) {
     iso14443b_setup();
 
+    clear_trace();
+    uint32_t trace_budget = BigBuf_max_traceLen();
+    if (trace_budget > 512) {
+        trace_budget -= 512;
+    } else {
+        trace_budget = 0;
+    }
+    BigBuf_set_trace_limits(trace_budget, 512);
     set_tracing(true);
 
     uint8_t *data = BigBuf_calloc(ISO14B_BLOCK_SIZE);
     iso14b_card_select_t *card = (iso14b_card_select_t *) BigBuf_calloc(sizeof(iso14b_card_select_t));
+    if (data == NULL || card == NULL) {
+        reply_ng(CMD_HF_SRI_READ, PM3_EMALLOC, NULL, 0);
+        goto out;
+    }
 
     int res = iso14443b_select_srx_card(card);
     if (res != PM3_SUCCESS) {
@@ -2406,6 +2418,7 @@ void read_14b_st_block(uint8_t blocknr) {
     reply_ng(CMD_HF_SRI_READ, res, data, ISO14B_BLOCK_SIZE);
 
 out:
+    BigBuf_disable_trace_limits();
     set_tracing(false);
     BigBuf_free_keep_EM();
     switch_off();

@@ -1119,6 +1119,7 @@ static int download_trace(void) {
     }
 
     gs_traceLen = resp.oldarg[2];
+    uint32_t dropped_records = resp.oldarg[1];
 
     // if tracelog buffer was larger and we need to download more.
     if (gs_traceLen > PM3_CMD_DATA_SIZE) {
@@ -1130,12 +1131,17 @@ static int download_trace(void) {
             return PM3_EMALLOC;
         }
 
-        if (!GetFromDevice(BIG_BUF, gs_trace, gs_traceLen, 0, NULL, 0, NULL, 2500, false)) {
+        if (!GetFromDevice(BIG_BUF, gs_trace, gs_traceLen, 0, NULL, 0, &resp, 2500, false)) {
             PrintAndLogEx(WARNING, "command execution time out");
             free(gs_trace);
             gs_trace = NULL;
             return PM3_ETIMEOUT;
         }
+        dropped_records = resp.oldarg[1];
+    }
+
+    if (dropped_records > 0) {
+        PrintAndLogEx(WARNING, "Trace saturated; additional records were dropped: %u", dropped_records);
     }
     return PM3_SUCCESS;
 }

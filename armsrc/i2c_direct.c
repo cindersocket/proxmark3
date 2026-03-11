@@ -36,19 +36,45 @@
 #include "i2c.h"
 #include "i2c_direct.h"
 
+#define SMARTCARD_TRACE_RESERVE_BYTES 1024
+
+static void smartcard_direct_configure_trace(smartcard_command_t flags) {
+    if ((flags & SC_NO_TRACE) == SC_NO_TRACE) {
+        BigBuf_disable_trace_limits();
+        set_tracing(false);
+        return;
+    }
+
+    if ((flags & SC_LOG) == SC_LOG) {
+        uint32_t trace_budget = BigBuf_max_traceLen();
+        if (trace_budget > SMARTCARD_TRACE_RESERVE_BYTES) {
+            trace_budget -= SMARTCARD_TRACE_RESERVE_BYTES;
+        } else {
+            trace_budget = 0;
+        }
+        BigBuf_set_trace_limits(trace_budget, SMARTCARD_TRACE_RESERVE_BYTES);
+        set_tracing(true);
+        return;
+    }
+
+    BigBuf_disable_trace_limits();
+    set_tracing(false);
+}
+
 static void SmartCardDirectSend(uint8_t prepend, const smart_card_raw_t *p, uint8_t *output, uint16_t *olen) {
     LED_D_ON();
 
     uint16_t len = 0;
     uint8_t *resp = BigBuf_calloc(ISO7816_MAX_FRAME);
-    resp[0] = prepend;
-    // check if alloacted...
     smartcard_command_t flags = p->flags;
 
-    if ((flags & SC_LOG) == SC_LOG)
-        set_tracing(true);
-    else
-        set_tracing(false);
+    smartcard_direct_configure_trace(flags);
+
+    if (resp == NULL) {
+        Dbprintf("SmartCardDirectSend: failed to allocate response buffer");
+        goto OUT;
+    }
+    resp[0] = prepend;
 
     if ((flags & SC_CONNECT) == SC_CONNECT) {
 
@@ -101,7 +127,12 @@ static void SmartCardDirectSend(uint8_t prepend, const smart_card_raw_t *p, uint
         uint8_t cmd_getresp[] = {0x00, ISO7816_GET_RESPONSE, 0x00, 0x00, resp[2]};
 
         smart_card_raw_t *payload = (smart_card_raw_t *)BigBuf_calloc(sizeof(smart_card_raw_t) + sizeof(cmd_getresp));
-        payload->flags = SC_RAW | SC_LOG;
+        if (payload == NULL) {
+            Dbprintf("SmartCardDirectSend: failed to allocate GET RESPONSE payload");
+            goto OUT;
+        }
+        payload->flags = flags & ~(SC_CONNECT | SC_SELECT | SC_CLEARLOG);
+        payload->flags |= SC_RAW;
         payload->len = sizeof(cmd_getresp);
         payload->wait_delay = 0;
         memcpy(payload->data, cmd_getresp, sizeof(cmd_getresp));
@@ -138,20 +169,19 @@ static void SmartCardDirectSend(uint8_t prepend, const smart_card_raw_t *p, uint
         AddCrc14A(&resp[1], len);
         Dbhexdump(len + 2, &resp[1], false);
 
-        BigBuf_free();
-
         if (prepend == 0xff) {
             Dbprintf("pdol request, we can ignore the response...");
-            return;
+            goto OUT;
         }
 
         memcpy(output, &resp[1], len + 2);
         *olen = len + 2;
-
-        BigBuf_free();
     }
 
 OUT:
+    BigBuf_free();
+    BigBuf_disable_trace_limits();
+    set_tracing(false);
     LEDsoff();
 }
 

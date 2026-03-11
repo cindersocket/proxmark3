@@ -2699,7 +2699,7 @@ static void PacketReceived(PacketCommandNG *packet) {
             }
             // Trigger a finish downloading signal with an ACK frame
             // arg0 = status of download transfer
-            reply_mix(CMD_ACK, 1, 0, BigBuf_get_traceLen(), NULL, 0);
+            reply_mix(CMD_ACK, 1, BigBuf_get_trace_dropped_records(), BigBuf_get_traceLen(), NULL, 0);
             LED_B_OFF();
             break;
         }

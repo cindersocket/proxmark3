@@ -24,6 +24,8 @@
 #include "cmd.h"
 #include "commonutil.h"
 #include "ticks.h"
+
+#define SAM_TRACE_RESERVE_BYTES 1024
 #include "dbprint.h"
 #include "i2c.h"
 #include "iso15693.h"
@@ -363,14 +365,29 @@ int sam_picopass_get_pacs(PacketCommandNG *c) {
     clear_trace();
     I2C_Reset_EnterMainProgram();
 
+    uint32_t trace_budget = BigBuf_max_traceLen();
+    if (trace_budget > SAM_TRACE_RESERVE_BYTES) {
+        trace_budget -= SAM_TRACE_RESERVE_BYTES;
+    } else {
+        trace_budget = 0;
+    }
+    BigBuf_set_trace_limits(trace_budget, SAM_TRACE_RESERVE_BYTES);
     set_tracing(true);
     StartTicks();
 
     // step 1: ping SAM
-    sam_get_version(info);
+    res = sam_get_version(info);
+    if (res != PM3_SUCCESS) {
+        reply_ng(CMD_HF_SAM_PICOPASS, res, NULL, 0);
+        goto off;
+    }
 
     if (info) {
-        sam_get_serial_number();
+        res = sam_get_serial_number();
+        if (res != PM3_SUCCESS) {
+            reply_ng(CMD_HF_SAM_PICOPASS, res, NULL, 0);
+            goto off;
+        }
         goto out;
     }
 
@@ -404,6 +421,10 @@ int sam_picopass_get_pacs(PacketCommandNG *c) {
     goto out;
 
 err:
+    if (res == PM3_EMALLOC) {
+        reply_ng(CMD_HF_SAM_PICOPASS, res, NULL, 0);
+        goto off;
+    }
     res = PM3_ENOPACS;
     reply_ng(CMD_HF_SAM_PICOPASS, res, NULL, 0);
     goto off;
@@ -415,6 +436,7 @@ off:
     if (disconnectAfter) {
         switch_off();
     }
+    BigBuf_disable_trace_limits();
     set_tracing(false);
     StopTicks();
     BigBuf_free();

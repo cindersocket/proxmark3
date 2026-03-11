@@ -327,7 +327,7 @@ static int smart_wait(uint8_t *out, int maxoutlen, bool verbose) {
     return -1;
 }
 
-static int smart_responseEx(uint8_t *out, int maxoutlen, bool verbose) {
+static int smart_responseEx(uint8_t *out, int maxoutlen, bool verbose, uint16_t extraFlags) {
 
     int datalen = smart_wait(out, maxoutlen, verbose);
     int totallen = datalen;
@@ -370,7 +370,12 @@ static int smart_responseEx(uint8_t *out, int maxoutlen, bool verbose) {
             PrintAndLogEx(WARNING, "Failed to allocate memory");
             goto out;
         }
-        payload->flags = SC_RAW | SC_LOG;
+        payload->flags = SC_RAW;
+        if ((extraFlags & SC_NO_TRACE) == SC_NO_TRACE) {
+            payload->flags |= SC_NO_TRACE;
+        } else {
+            payload->flags |= SC_LOG;
+        }
         payload->len = sizeof(cmd_getresp);
         payload->wait_delay = 0;
         memcpy(payload->data, cmd_getresp, sizeof(cmd_getresp));
@@ -413,10 +418,6 @@ out:
     return totallen;
 }
 
-static int smart_response(uint8_t *out, int maxoutlen) {
-    return smart_responseEx(out, maxoutlen, true);
-}
-
 static int CmdSmartRaw(const char *Cmd) {
     CLIParserContext *ctx;
     CLIParserInit(&ctx, "smart raw",
@@ -432,6 +433,7 @@ static int CmdSmartRaw(const char *Cmd) {
         arg_lit0("r", NULL, "do not read response"),
         arg_lit0("a", NULL, "active smartcard without select (reset sc module)"),
         arg_lit0("s", NULL, "active smartcard with select (get ATR)"),
+        arg_lit0(NULL, "no-trace", "disable PM3 trace for this session"),
         arg_lit0("t", "tlv", "executes TLV decoder if it possible"),
         arg_lit0("0", NULL, "use protocol T=0"),
         arg_int0(NULL, "timeout", "<ms>", "Timeout in MS waiting for SIM to respond. (def 337ms)"),
@@ -443,13 +445,14 @@ static int CmdSmartRaw(const char *Cmd) {
     bool reply = (arg_get_lit(ctx, 1) == false);
     bool active = arg_get_lit(ctx, 2);
     bool active_select = arg_get_lit(ctx, 3);
-    bool decode_tlv = arg_get_lit(ctx, 4);
-    bool use_t0 = arg_get_lit(ctx, 5);
-    int timeout = arg_get_int_def(ctx, 6, -1);
+    bool no_trace = arg_get_lit(ctx, 4);
+    bool decode_tlv = arg_get_lit(ctx, 5);
+    bool use_t0 = arg_get_lit(ctx, 6);
+    int timeout = arg_get_int_def(ctx, 7, -1);
 
     int dlen = 0;
     uint8_t data[PM3_CMD_DATA_SIZE] = {0x00};
-    int res = CLIParamHexToBuf(arg_get_str(ctx, 7), data, sizeof(data), &dlen);
+    int res = CLIParamHexToBuf(arg_get_str(ctx, 8), data, sizeof(data), &dlen);
     CLIParserFree(ctx);
 
     if (res) {
@@ -465,7 +468,7 @@ static int CmdSmartRaw(const char *Cmd) {
     payload->len = dlen;
     memcpy(payload->data, data, dlen);
 
-    payload->flags = SC_LOG;
+    payload->flags = no_trace ? SC_NO_TRACE : SC_LOG;
     if (active || active_select) {
 
         payload->flags |= (SC_CONNECT | SC_CLEARLOG);
@@ -502,7 +505,7 @@ static int CmdSmartRaw(const char *Cmd) {
     }
 
     // reading response from smart card
-    int len = smart_response(buf, PM3_CMD_DATA_SIZE);
+    int len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, true, payload->flags);
     if (len < 0) {
         free(payload);
         free(buf);
@@ -517,7 +520,7 @@ static int CmdSmartRaw(const char *Cmd) {
         clearCommandBuffer();
         SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) + dlen);
 
-        len = smart_response(buf, PM3_CMD_DATA_SIZE);
+        len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, true, payload->flags);
 
         data[4] = 0;
     }
@@ -940,7 +943,7 @@ static void smart_brute_prim(void) {
         SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) + 5);
         free(payload);
 
-        int len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false);
+        int len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false, 0);
         if (len > 2) {
             PrintAndLogEx(SUCCESS, "\tHEX  %d |: %s", len, sprint_hex(buf, len));
         }
@@ -990,7 +993,7 @@ static int smart_brute_sfi(bool decodeTLV) {
             clearCommandBuffer();
             SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) +  sizeof(READ_RECORD));
 
-            len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false);
+            len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false, 0);
 
             if (buf[0] == 0x6C) {
                 READ_RECORD[4] = buf[1];
@@ -998,7 +1001,7 @@ static int smart_brute_sfi(bool decodeTLV) {
                 memcpy(payload->data, READ_RECORD, sizeof(READ_RECORD));
                 clearCommandBuffer();
                 SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) +  sizeof(READ_RECORD));
-                len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false);
+                len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false, 0);
 
                 READ_RECORD[4] = 0;
             }
@@ -1049,7 +1052,7 @@ static void smart_brute_options(bool decodeTLV) {
     SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) + sizeof(GET_PROCESSING_OPTIONS));
     free(payload);
 
-    int len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false);
+    int len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false, 0);
     if (len > 4) {
         PrintAndLogEx(SUCCESS, "Got processing options");
         if (decodeTLV) {
@@ -1167,7 +1170,7 @@ static int CmdSmartBruteforceSFI(const char *Cmd) {
         SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) + hexlen);
         free(payload);
 
-        int len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false);
+        int len = smart_responseEx(buf, PM3_CMD_DATA_SIZE, false, 0);
         if (len < 3)
             continue;
 
@@ -1446,7 +1449,7 @@ int CmdSmartcard(const char *Cmd) {
     return CmdsParse(CommandTable, Cmd);
 }
 
-int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCard, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen) {
+int ExchangeAPDUSCEx(bool verbose, uint8_t *datain, int datainlen, bool activateCard, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen, uint16_t extraFlags) {
 
     *dataoutlen = 0;
 
@@ -1455,7 +1458,12 @@ int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCa
         PrintAndLogEx(WARNING, "Failed to allocate memory");
         return PM3_EMALLOC;
     }
-    payload->flags = (SC_RAW_T0 | SC_LOG);
+    payload->flags = SC_RAW_T0;
+    if ((extraFlags & SC_NO_TRACE) == SC_NO_TRACE) {
+        payload->flags |= SC_NO_TRACE;
+    } else {
+        payload->flags |= SC_LOG;
+    }
     if (activateCard) {
         payload->flags |= (SC_SELECT | SC_CONNECT);
     }
@@ -1466,7 +1474,7 @@ int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCa
     clearCommandBuffer();
     SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) + datainlen);
 
-    int len = smart_responseEx(dataout, maxdataoutlen, verbose);
+    int len = smart_responseEx(dataout, maxdataoutlen, verbose, payload->flags);
     if (len < 0) {
         free(payload);
         return PM3_ESOFT;
@@ -1476,6 +1484,11 @@ int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCa
     if (len > 1 && dataout[len - 2] == 0x6c && datainlen > 4) {
 
         payload->flags = SC_RAW_T0;
+        if ((extraFlags & SC_NO_TRACE) == SC_NO_TRACE) {
+            payload->flags |= SC_NO_TRACE;
+        } else {
+            payload->flags |= SC_LOG;
+        }
         payload->len = 5;
         // transfer length via T=0
         datain[4] = dataout[len - 1];
@@ -1483,7 +1496,7 @@ int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCa
         clearCommandBuffer();
         SendCommandNG(CMD_SMART_RAW, (uint8_t *)payload, sizeof(smart_card_raw_t) + 5);
         datain[4] = 0;
-        len = smart_responseEx(dataout, maxdataoutlen, verbose);
+        len = smart_responseEx(dataout, maxdataoutlen, verbose, payload->flags);
         if (len < 0) {
             free(payload);
             return PM3_ESOFT;
@@ -1493,6 +1506,10 @@ int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCa
     free(payload);
     *dataoutlen = len;
     return PM3_SUCCESS;
+}
+
+int ExchangeAPDUSC(bool verbose, uint8_t *datain, int datainlen, bool activateCard, bool leaveSignalON, uint8_t *dataout, int maxdataoutlen, int *dataoutlen) {
+    return ExchangeAPDUSCEx(verbose, datain, datainlen, activateCard, leaveSignalON, dataout, maxdataoutlen, dataoutlen, 0);
 }
 
 bool smart_select(bool verbose, smart_card_atr_t *atr) {

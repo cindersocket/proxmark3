@@ -61,6 +61,11 @@ static int sam_set_card_detected_seos(iso14a_card_select_t *card_select) {
     uint8_t *response = BigBuf_calloc(ISO7816_MAX_FRAME);
     uint16_t response_len = ISO7816_MAX_FRAME;
 
+    if (request == NULL || response == NULL) {
+        res = PM3_EMALLOC;
+        goto out;
+    }
+
     const uint8_t payload[] = {
         0xa0, 8, // <- SAM command
         0xad, 6, // <- set detected card
@@ -75,13 +80,16 @@ static int sam_set_card_detected_seos(iso14a_card_select_t *card_select) {
     sam_append_asn1_node(request, request + 4, 0x83, &card_select->sak, 1);
     request_len = request[1] + 2;
 
-    sam_send_payload(
+    res = sam_send_payload(
         0x44, 0x0a, 0x44,
         request,
         &request_len,
         response,
         &response_len
     );
+    if (res != PM3_SUCCESS) {
+        goto out;
+    }
 
     // resp:
     // c1 64 00 00 00
@@ -135,7 +143,7 @@ static int sam_send_request_iso14a(const uint8_t *const request, const uint8_t r
 
     uint8_t *buf1 = BigBuf_calloc(ISO7816_MAX_FRAME);
     uint8_t *buf2 = BigBuf_calloc(ISO7816_MAX_FRAME);
-    if (buf1 == NULL || buf2 == NULL) {
+    if (buf1 == NULL || buf2 == NULL || response == NULL || response_len == NULL) {
         res = PM3_EMALLOC;
         goto out;
     }
@@ -170,11 +178,18 @@ static int sam_send_request_iso14a(const uint8_t *const request, const uint8_t r
         memcpy(sam_tx_buf, payload, sam_tx_len);
     }
 
-    sam_send_payload(
+    res = sam_send_payload(
         0x44, 0x0a, 0x44,
         sam_tx_buf, &sam_tx_len,
         sam_rx_buf, &sam_rx_len
     );
+    if (res != PM3_SUCCESS) {
+        goto out;
+    }
+    if (sam_rx_len < 2) {
+        res = PM3_ESOFT;
+        goto out;
+    }
 
     if (sam_rx_buf[1] == 0x61) { // commands to be relayed to card starts with 0x61
         // tag <-> SAM exchange starts here
@@ -183,12 +198,22 @@ static int sam_send_request_iso14a(const uint8_t *const request, const uint8_t r
             nfc_tx_len = sam_copy_payload_sam2nfc(nfc_tx_buf, sam_rx_buf);
 
             nfc_rx_len = iso14_apdu(nfc_tx_buf, nfc_tx_len, false, nfc_rx_buf, ISO7816_MAX_FRAME, NULL);
-            // iceman:  should check nfc_rx_len ,  if negative something went wrong...
+            if (nfc_rx_len < 2) {
+                res = PM3_ESOFT;
+                goto out;
+            }
 
             switch_clock_to_ticks();
             sam_tx_len = sam_copy_payload_nfc2sam(sam_tx_buf, nfc_rx_buf, nfc_rx_len - 2);
 
-            sam_send_payload(0x14, 0x0a, 0x14, sam_tx_buf, &sam_tx_len, sam_rx_buf, &sam_rx_len);
+            res = sam_send_payload(0x14, 0x0a, 0x14, sam_tx_buf, &sam_tx_len, sam_rx_buf, &sam_rx_len);
+            if (res != PM3_SUCCESS) {
+                goto out;
+            }
+            if (sam_rx_len < 8) {
+                res = PM3_ESOFT;
+                goto out;
+            }
 
             // last SAM->TAG
             // c1 61 c1 00 00 a1 02 >>82<< 00 90 00
@@ -206,11 +231,14 @@ static int sam_send_request_iso14a(const uint8_t *const request, const uint8_t r
         sam_tx_len = sizeof(hfack);
         memcpy(sam_tx_buf, hfack, sam_tx_len);
 
-        sam_send_payload(
+        res = sam_send_payload(
             0x14, 0x0a, 0x00,
             sam_tx_buf, &sam_tx_len,
             sam_rx_buf, &sam_rx_len
         );
+        if (res != PM3_SUCCESS) {
+            goto out;
+        }
     }
 
     // resp for SamCommandGetContentElement:
@@ -247,7 +275,16 @@ static int sam_send_request_iso14a(const uint8_t *const request, const uint8_t r
         }
     }
 
+    if (sam_rx_len < 7) {
+        res = PM3_ESOFT;
+        goto out;
+    }
+
     *response_len = sam_rx_buf[5 + 1] + 2;
+    if ((uint16_t)(5 + *response_len) > sam_rx_len) {
+        res = PM3_ESOFT;
+        goto out;
+    }
     memcpy(response, sam_rx_buf + 5, *response_len);
 
 out:
@@ -264,10 +301,13 @@ out:
  *
  * @return Status code indicating success or failure of the operation.
  */
+#define SAM_TRACE_RESERVE_BYTES 1024
+
 int sam_seos_get_pacs(PacketCommandNG *c) {
     const uint8_t flags = c->data.asBytes[0];
     const bool disconnectAfter = !!(flags & BITMASK(0));
     const bool skipDetect = !!(flags & BITMASK(1));
+    const bool noTrace = !!(flags & BITMASK(2));
 
     uint8_t *cmd = c->data.asBytes + 1;
     uint16_t cmd_len = c->length - 1;
@@ -275,14 +315,30 @@ int sam_seos_get_pacs(PacketCommandNG *c) {
 
     int res = PM3_EFAILED;
 
-    clear_trace();
     I2C_Reset_EnterMainProgram();
 
-    set_tracing(true);
+    if (noTrace) {
+        BigBuf_disable_trace_limits();
+        set_tracing(false);
+    } else {
+        clear_trace();
+        uint32_t trace_budget = BigBuf_max_traceLen();
+        if (trace_budget > SAM_TRACE_RESERVE_BYTES) {
+            trace_budget -= SAM_TRACE_RESERVE_BYTES;
+        } else {
+            trace_budget = 0;
+        }
+        BigBuf_set_trace_limits(trace_budget, SAM_TRACE_RESERVE_BYTES);
+        set_tracing(true);
+    }
     StartTicks();
 
     // step 1: ping SAM
-    sam_get_version(false);
+    res = sam_get_version(false);
+    if (res != PM3_SUCCESS) {
+        reply_ng(CMD_HF_SAM_SEOS, res, NULL, 0);
+        goto off;
+    }
 
     if (skipDetect == false) {
         // step 2: get card information
@@ -297,7 +353,10 @@ int sam_seos_get_pacs(PacketCommandNG *c) {
         switch_clock_to_ticks();
 
         // step 3: SamCommand CardDetected
-        sam_set_card_detected_seos(&card_a_info);
+        res = sam_set_card_detected_seos(&card_a_info);
+        if (res != PM3_SUCCESS) {
+            goto err;
+        }
     }
 
     // step 3: SamCommand RequestPACS, relay NFC communication
@@ -315,6 +374,10 @@ int sam_seos_get_pacs(PacketCommandNG *c) {
     goto out;
 
 err:
+    if (res == PM3_EMALLOC) {
+        reply_ng(CMD_HF_SAM_SEOS, res, NULL, 0);
+        goto off;
+    }
     res = PM3_ENOPACS;
     reply_ng(CMD_HF_SAM_SEOS, res, NULL, 0);
     goto off;
@@ -326,6 +389,7 @@ off:
     if (disconnectAfter) {
         switch_off();
     }
+    BigBuf_disable_trace_limits();
     set_tracing(false);
     StopTicks();
     BigBuf_free();
