@@ -13,6 +13,10 @@ TESTDESFIREHAMMER=false
 TESTSMARTCARDHAMMER=false
 TESTSEOSHAMMER=false
 
+DESFIRE_MIN_DROPPED_RECORDS=100
+SMARTCARD_MIN_DROPPED_RECORDS=100
+SEOS_MIN_DROPPED_RECORDS=100
+
 # https://medium.com/@Drew_Stokes/bash-argument-parsing-54f3b81a6a8f
 PARAMS=""
 while (( "$#" )); do
@@ -116,6 +120,30 @@ function CheckExecute() {
   return 1
 }
 
+function CheckDroppedRecords() {
+  printf "%-40s" "$1 "
+
+  start=$(date +%s)
+  TIMEINFO=""
+  RES=$(eval "$2")
+  end=$(date +%s)
+  delta=$(expr $end - $start)
+  if [ $delta -gt 2 ]; then
+    TIMEINFO="  ($delta s)"
+  fi
+
+  DROPPED=$(echo "$RES" | sed -nE 's/.*Trace saturated; additional records were dropped: ([0-9]+).*/\1/p' | tail -n 1)
+  if [ -n "$DROPPED" ] && [ "$DROPPED" -ge "$3" ]; then
+    echo -e "[ ${C_GREEN}OK${C_NC} ] ${C_OK} dropped=$DROPPED $TIMEINFO"
+    return 0
+  fi
+
+  echo -e "[ ${C_RED}FAIL${C_NC} ] ${C_FAIL} $TIMEINFO"
+  echo "Execution trace:"
+  echo "$RES"
+  return 1
+}
+
 echo -e "${C_BLUE}Iceman Proxmark3 online test tool${C_NC}"
 echo ""
 echo "work directory: $(pwd)"
@@ -165,17 +193,17 @@ while true; do
       echo "  PLACE A DESFIRE CARD ON THE READER NOW"
       if ! CheckFileExist "pm3 exists" "$PM3BIN"; then break; fi
 
-      if ! CheckExecute "reader alive" "$PM3BIN -c 'hw ping'" "Ping.*OK|received packet"; then break; fi
+      if ! CheckExecute "reader alive" "$PM3BIN -c 'hw ping'" "Ping response received|received packet|Ping.*OK"; then break; fi
       if ! CheckExecute "trace-on hammer" "$PM3BIN -c 'script run tests/hf_14a_desfire_hammer -i 750'" "HAMMER PASS"; then break; fi
-      if ! CheckExecute "reader alive after trace-on" "$PM3BIN -c 'hw ping'" "Ping.*OK|received packet"; then break; fi
-      if ! CheckExecute "trace saturation visible" "$PM3BIN -c 'trace list -1 -t 14a'" "Trace saturated"; then break; fi
+      if ! CheckExecute "reader alive after trace-on" "$PM3BIN -c 'hw ping'" "Ping response received|received packet|Ping.*OK"; then break; fi
+      if ! CheckDroppedRecords "trace saturation visible" "$PM3BIN -c 'trace list -t 14a'" "$DESFIRE_MIN_DROPPED_RECORDS"; then break; fi
 
       if ! CheckExecute "clear trace buffer" "$PM3BIN -c 'data clear'" ".*"; then break; fi
-      if ! CheckExecute "cli no-trace smoke" "$PM3BIN -c 'hf 14a apdu -s --no-trace -d 9060000000'" "<<< status: 91 00"; then break; fi
+      if ! CheckExecute "cli no-trace smoke" "$PM3BIN -c 'hf 14a apdu -s -k --no-trace -d 9060000000; hf 14a apdu -k --no-trace -d 90AF000000; hf 14a apdu --no-trace -d 90AF000000'" "<<< status: 91 00"; then break; fi
       if ! CheckExecute "clear trace buffer again" "$PM3BIN -c 'data clear'" ".*"; then break; fi
       if ! CheckExecute "trace-off hammer" "$PM3BIN -c 'script run tests/hf_14a_desfire_hammer -i 250 -n'" "HAMMER PASS"; then break; fi
-      if ! CheckExecute "reader alive after trace-off" "$PM3BIN -c 'hw ping'" "Ping.*OK|received packet"; then break; fi
-      if ! CheckExecute "trace stays empty" "$PM3BIN -c 'trace list -1 -t 14a'" "there is no trace"; then break; fi
+      if ! CheckExecute "reader alive after trace-off" "$PM3BIN -c 'hw ping'" "Ping response received|received packet|Ping.*OK"; then break; fi
+      if ! CheckExecute "trace stays empty" "$PM3BIN -c 'trace list -t 14a'" "there is no trace|Recorded activity \( 0 bytes \)"; then break; fi
 
       echo "  DESFire hammer tests completed successfully!"
     fi
@@ -191,7 +219,7 @@ while true; do
       if ! CheckExecute "reader alive" "$PM3BIN -c 'hw ping'" "Ping.*OK|received packet"; then break; fi
       if ! CheckExecute "trace-on hammer" "$PM3BIN -c 'script run tests/smartcard_trace_hammer -i 750 -a $APDU -w $EXPECTED_SW'" "HAMMER PASS"; then break; fi
       if ! CheckExecute "reader alive after trace-on" "$PM3BIN -c 'hw ping'" "Ping.*OK|received packet"; then break; fi
-      if ! CheckExecute "trace saturation visible" "$PM3BIN -c 'trace list -1 -t 7816'" "Trace saturated"; then break; fi
+      if ! CheckDroppedRecords "trace saturation visible" "$PM3BIN -c 'trace list -1 -t 7816'" "$SMARTCARD_MIN_DROPPED_RECORDS"; then break; fi
 
       if ! CheckExecute "clear trace buffer" "$PM3BIN -c 'data clear'" ".*"; then break; fi
       if ! CheckExecute "cli no-trace smoke" "$PM3BIN -c 'smart raw -s --no-trace -0 -d $APDU'" "9000|Response data"; then break; fi
@@ -211,7 +239,7 @@ while true; do
       if ! CheckExecute "reader alive" "$PM3BIN -c 'hw ping'" "Ping.*OK|received packet"; then break; fi
       if ! CheckExecute "trace-on hammer" "$PM3BIN -c 'script run tests/hf_seos_sam_hammer -i 750'" "HAMMER PASS"; then break; fi
       if ! CheckExecute "reader alive after trace-on" "$PM3BIN -c 'hw ping'" "Ping.*OK|received packet"; then break; fi
-      if ! CheckExecute "trace saturation visible" "$PM3BIN -c 'trace list -1 -t seos'" "Trace saturated"; then break; fi
+      if ! CheckDroppedRecords "trace saturation visible" "$PM3BIN -c 'trace list -1 -t seos'" "$SEOS_MIN_DROPPED_RECORDS"; then break; fi
 
       if ! CheckExecute "clear trace buffer" "$PM3BIN -c 'data clear'" ".*"; then break; fi
       if ! CheckExecute "cli no-trace smoke" "$PM3BIN -c 'hf seos sam --no-trace'" "No PACS data|Physical Access Bits|ObjectID|Tag"; then break; fi

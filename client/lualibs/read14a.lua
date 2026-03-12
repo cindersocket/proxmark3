@@ -82,11 +82,13 @@ local function parse14443a(data)
     }
 end
 
--- This function does a connect and retrieves som einfo
+-- This function does a connect and retrieves some info
 -- @param dont_disconnect - if true, does not disable the field
+-- @param no_rats - if true, skip RATS during selection
+-- @param extra_flags - optional extra ISO14A command flags to OR into the select command
 -- @return if successful: an table containing card info
 -- @return if unsuccessful : nil, error
-local function read14443a(dont_disconnect, no_rats)
+local function read14443a(dont_disconnect, no_rats, extra_flags)
     local command, result, info, err, data
 
     command = Command:newMIX{
@@ -99,6 +101,9 @@ local function read14443a(dont_disconnect, no_rats)
     end
     if no_rats then
         command.arg1 = command.arg1 + ISO14A_COMMAND.ISO14A_NO_RATS
+    end
+    if extra_flags ~= nil then
+        command.arg1 = command.arg1 + extra_flags
     end
 
     local result, err = command:sendMIX()

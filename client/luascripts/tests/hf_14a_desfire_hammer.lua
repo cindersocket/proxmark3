@@ -29,8 +29,6 @@ local DEFAULT_ITERATIONS = 500
 local APDU_GET_VERSION = '9060000000'
 local APDU_GET_MORE = '90AF000000'
 
-local band = bit32.band
-
 local function help()
     print(copyright)
     print(author)
@@ -51,22 +49,22 @@ local function fail(msg)
 end
 
 local function unpack_ack(result)
-    local _, _, arg0, arg1, data = bin.unpack('LLLLH', result)
+    local count, _, arg0, arg1, arg2 = bin.unpack('LLLL', result)
+    local payload = ''
+
+    if arg0 > 0 then
+        payload = string.sub(result, count, count + arg0 - 1)
+    end
+
     if arg0 > 0x7FFFFFFF then
         arg0 = arg0 - 0x100000000
     end
-    local payload = ''
-    if arg0 > 0 then
-        payload = data:sub(1, arg0 * 2)
-    end
-    return arg0, band(arg1, 0xFF), payload
+
+    return arg0, arg1, arg2, payload
 end
 
 local function send_apdu_frame(apdu_hex, connect, no_trace)
     local flags = lib14a.ISO14A_COMMAND.ISO14A_APDU + lib14a.ISO14A_COMMAND.ISO14A_NO_DISCONNECT
-    if connect then
-        flags = flags + lib14a.ISO14A_COMMAND.ISO14A_CONNECT
-    end
     if no_trace then
         flags = flags + lib14a.ISO14A_COMMAND.ISO14A_NO_TRACE
     end
@@ -81,47 +79,131 @@ local function send_apdu_frame(apdu_hex, connect, no_trace)
     return command:sendMIX(false, 5000)
 end
 
-local function exchange_apdu(apdu_hex, connect, no_trace)
-    local response = ''
-    local frame = apdu_hex
-    local need_connect = connect
-
-    while true do
-        local result, err = send_apdu_frame(frame, need_connect, no_trace)
-        if not result then
-            return fail(err or 'device did not acknowledge APDU frame')
-        end
-
-        local len, pcb, payload = unpack_ack(result)
-        if len < 0 then
-            return fail(('firmware returned error %d'):format(len))
-        end
-        if len > 0 then
-            response = response .. payload
-        end
-        if band(pcb, 0x10) == 0 then
-            return response, nil
-        end
-
-        frame = ''
-        need_connect = false
+local function connect_card(no_trace, iteration)
+    local extra_flags = 0
+    if no_trace then
+        extra_flags = lib14a.ISO14A_COMMAND.ISO14A_NO_TRACE
     end
+
+    local info, err = lib14a.read(true, false, extra_flags)
+    if not info then
+        return fail(('iteration %d select failed: %s'):format(iteration, err or 'no card in field'))
+    end
+
+    return true, nil
 end
 
-local function exchange_desfire_get_version(connect, no_trace)
-    local response, err = exchange_apdu(APDU_GET_VERSION, connect, no_trace)
-    if not response then
-        return nil, err
+local function exchange_apdu(apdu_hex, connect, no_trace)
+    local result, err = send_apdu_frame(apdu_hex, connect, no_trace)
+    if not result then
+        return nil, err or 'device did not acknowledge APDU frame'
     end
 
-    while #response >= 4 and response:sub(-4) == '91AF' do
-        local more_response
-        more_response, err = exchange_apdu(APDU_GET_MORE, false, no_trace)
-        if not more_response then
-            return nil, err
-        end
+    local len, status, _, payload = unpack_ack(result)
+    if len < 0 then
+        return nil, ('firmware returned error %d'):format(len)
+    end
+    if len < 2 then
+        return nil, ('short APDU frame len=%d status=%d'):format(len, status)
+    end
 
-        response = response .. more_response
+    return payload, nil
+end
+
+local function response_hex(response)
+    local out = {}
+    for i = 1, #response do
+        out[i] = ('%02X'):format(string.byte(response, i))
+    end
+    return table.concat(out)
+end
+
+local function response_without_crc(response)
+    local len = #response
+    if len < 2 then
+        return nil
+    end
+
+    return string.sub(response, 1, len - 2)
+end
+
+local function response_sw(response)
+    local payload = response_without_crc(response)
+    if payload == nil then
+        return nil
+    end
+
+    local len = #payload
+    if len < 2 then
+        return nil
+    end
+
+    return ('%02X%02X'):format(string.byte(payload, len - 1), string.byte(payload, len))
+end
+
+local function payload_sw(payload)
+    local len = #payload
+    if len < 2 then
+        return nil
+    end
+
+    return ('%02X%02X'):format(string.byte(payload, len - 1), string.byte(payload, len))
+end
+
+local function expect_status(response, expected_sw, iteration, step)
+    if #response < 4 then
+        return fail(('iteration %d step %d returned a short APDU response'):format(iteration, step))
+    end
+
+    local sw = response_sw(response)
+    if sw ~= expected_sw then
+        return fail(('iteration %d step %d returned DESFire status %s payload=%s'):format(
+            iteration,
+            step,
+            sw,
+            response_hex(response)
+        ))
+    end
+
+    return true, nil
+end
+
+local function exchange_desfire_get_version(connect, no_trace, iteration)
+    local response1, err = exchange_apdu(APDU_GET_VERSION, connect, no_trace)
+    if not response1 then
+        return fail(('iteration %d step 1 failed: %s'):format(iteration, err))
+    end
+    local ok = expect_status(response1, '91AF', iteration, 1)
+    if not ok then
+        return nil, 'unexpected DESFire continuation status'
+    end
+
+    local response2
+    response2, err = exchange_apdu(APDU_GET_MORE, false, no_trace)
+    if not response2 then
+        return fail(('iteration %d step 2 failed: %s'):format(iteration, err))
+    end
+    ok = expect_status(response2, '91AF', iteration, 2)
+    if not ok then
+        return nil, 'unexpected DESFire continuation status'
+    end
+
+    local response3
+    response3, err = exchange_apdu(APDU_GET_MORE, false, no_trace)
+    if not response3 then
+        return fail(('iteration %d step 3 failed: %s'):format(iteration, err))
+    end
+    ok = expect_status(response3, '9100', iteration, 3)
+    if not ok then
+        return nil, 'unexpected DESFire final status'
+    end
+
+    local response = response_without_crc(response1) .. response_without_crc(response2) .. response_without_crc(response3)
+    if #response < 9 then
+        return fail(('iteration %d returned a short concatenated DESFire response (%d bytes)'):format(
+            iteration,
+            #response
+        ))
     end
 
     return response, nil
@@ -168,20 +250,20 @@ local function main(args)
             connect = true
         end
 
-        local response, err = exchange_desfire_get_version(connect, no_trace)
+        if connect then
+            local ok, err = connect_card(no_trace, i)
+            if not ok then
+                return nil, err
+            end
+        end
+
+        local response, err = exchange_desfire_get_version(connect, no_trace, i)
         if not response then
             return nil, err
         end
-        if #response < 4 then
-            return fail(('iteration %d returned a short APDU response'):format(i))
-        end
 
-        local sw = response:sub(-4)
-        if sw ~= '9100' then
-            return fail(('iteration %d returned DESFire status %s'):format(i, sw))
-        end
-
-        print(('iter %d/%d ok len=%d sw=%s'):format(i, iterations, #response / 2, sw))
+        local sw = payload_sw(response)
+        print(('iter %d/%d ok len=%d sw=%s'):format(i, iterations, #response, sw))
     end
 
     lib14a.disconnect()
