@@ -345,7 +345,9 @@ static size_t iclass_legacy_pacs_payload_binstr_from_container(const uint8_t *co
     }
 
     size_t payload_len = ICLASS_LEGACY_PACS_CONTAINER_BITS - first_one - ICLASS_LEGACY_PACS_SENTINEL_BITS;
-    if (payload_len == 0 || payload_len >= ICLASS_LEGACY_PACS_MAX_BITS || payload_len >= binstr_size) {
+    // Allow full-width legacy PACS payloads up to the container max (143 bits), while still
+    // rejecting empty payloads and outputs that would overflow the destination buffer.
+    if (payload_len == 0 || payload_len > ICLASS_LEGACY_PACS_MAX_BITS || payload_len >= binstr_size) {
         binstr[0] = '\0';
         return 0;
     }

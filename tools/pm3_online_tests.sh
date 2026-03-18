@@ -192,8 +192,12 @@ function ExtractIClassBlockHex() {
     local CLEANLINE
     CLEANLINE=$(printf '%s\n' "$LINE" | sed -E 's/\x1B\[[0-9;?]*[[:alpha:]]//g')
 
-    if [[ "$CLEANLINE" =~ [[:space:]]*block[[:space:]]*${BLOCK}/0x[0-9A-Fa-f]{2}[[:space:]]*:[[:space:]]+([0-9A-Fa-f]{2}([[:space:]]+[0-9A-Fa-f]{2}){7}) ]]; then
-      printf '%s' "${BASH_REMATCH[1]}"
+    # Support both spaced and compact block print formats from different pm3 versions
+    # (for example: `6/0x06 -> ...` and `  6 | xx xx ...` style output).
+    if [[ "$CLEANLINE" =~ ${BLOCK}/0x[0-9A-Fa-f]{2}.*(\||:|->)[[:space:]]*([0-9A-Fa-f]{16}|([0-9A-Fa-f]{2}([[:space:]]+[0-9A-Fa-f]{2}){7})).* ]]; then
+      local HEX="${BASH_REMATCH[2]}"
+      HEX=${HEX// /}
+      printf '%s' "$HEX"
       return 0
     fi
   done <<< "$OUTPUT"
@@ -345,6 +349,9 @@ function CheckMfHidEncodeCleanup() {
 function CheckIClassEncodeRoundTrip() {
   local LABEL="$1"
   local ENCODE_ARGS="$2"
+  # Expected decoded PACS length lets us validate that both short and long payload encodings
+  # survive a full physical write/read roundtrip and client-side decode.
+  local EXPECTED_BITS_LEN="$3"
 
   printf "%-40s" "$LABEL "
 
@@ -417,6 +424,58 @@ function CheckIClassEncodeRoundTrip() {
     echo "  7/0x07: $READ7"
     echo "  8/0x08: $READ8"
     echo "  9/0x09: $READ9"
+    return 1
+  fi
+
+  # Persist a fresh tag dump so the existing `hf iclass view` decode path can be exercised.
+  # This catches payload extraction regressions that are not visible from raw block reads alone.
+  local DUMP_FILE
+  DUMP_FILE="$(mktemp)"
+  trap 'rm -f "$DUMP_FILE"' RETURN
+
+  # Verify that we can read the full iCLASS tag contents from the physical card.
+  RES=$($PM3BIN -c "hf iclass dump --ki 0 -f $DUMP_FILE" 2>&1)
+  if [ $? -ne 0 ] || [ ! -f "$DUMP_FILE" ]; then
+    echo -e "[ ${C_RED}FAIL${C_NC} ] ${C_FAIL}"
+    echo "Failed to dump iCLASS card for client decode check."
+    echo "$RES"
+    return 1
+  fi
+
+  # Run the client decode path used by normal inspection (`view`) and fail fast on decode errors.
+  local DECODE_RES
+  DECODE_RES=$($PM3BIN -c "hf iclass view -f $DUMP_FILE" 2>&1)
+  if echo "$DECODE_RES" | grep -E -q "Invalid legacy PACS payload|missing sentinel bit"; then
+    echo -e "[ ${C_RED}FAIL${C_NC} ] ${C_FAIL}"
+    echo "Client-side decode reported invalid PACS payload."
+    echo "$DECODE_RES"
+    return 1
+  fi
+
+  # Extract the decoded legacy PACS binary line so we can confirm we got back the same payload size.
+  local DECODE_LINE
+  DECODE_LINE="$(printf '%s\n' "$DECODE_RES" | LANG=C grep -a -m1 -E 'Binary\.\.\.')"
+  local DECODE_BINARY=""
+  local DECODE_LEN=0
+  if [ -n "$DECODE_LINE" ]; then
+    DECODE_BINARY="$(printf '%s\n' "$DECODE_LINE" | LANG=C sed -E 's/.*Binary\.\.\.[[:space:]]+([01]+).*/\1/')"
+    DECODE_LEN="$(printf '%s\n' "$DECODE_LINE" | LANG=C sed -E 's/.*\(([[:space:]]*[0-9]+)[[:space:]]*\).*/\1/' | tr -d '[:space:]')"
+  fi
+
+  # If decode output exists but lacks a parseable bitstring/length, treat as a regression.
+  if [ -z "$DECODE_BINARY" ] || [ "$DECODE_LEN" -eq 0 ]; then
+    echo -e "[ ${C_RED}FAIL${C_NC} ] ${C_FAIL}"
+    echo "Failed to extract legacy PACS payload from client decode output."
+    echo "$DECODE_RES"
+    return 1
+  fi
+
+  # Keep test output strict: the decoded PACS length should match the requested encode length.
+  if [ -n "$EXPECTED_BITS_LEN" ] && [ "$DECODE_LEN" -ne "$EXPECTED_BITS_LEN" ]; then
+    echo -e "[ ${C_RED}FAIL${C_NC} ] ${C_FAIL}"
+    echo "Expected client decode payload length: $EXPECTED_BITS_LEN"
+    echo "Actual payload length:           $DECODE_LEN"
+    echo "$DECODE_RES"
     return 1
   fi
 
@@ -527,10 +586,14 @@ while true; do
       if ! CheckFileExist "pm3 exists"               "$PM3BIN"; then break; fi
 
       WaitForEnter "PLACE A BLANK iCLASS TAG ON THE PM3 NOW"
-      if ! CheckIClassEncodeRoundTrip "hf iclass encode bin roundtrip"     "--bin 10001111100000001010100011 --ki 0 --enc none"; then break; fi
-      if ! CheckIClassEncodeRoundTrip "hf iclass encode raw roundtrip"     "--raw 063E02A3 --ki 0 --enc none"; then break; fi
-      if ! CheckIClassEncodeRoundTrip "hf iclass encode new roundtrip"     "--new 068F80A8C0 --ki 0 --enc none"; then break; fi
-      if ! CheckIClassEncodeRoundTrip "hf iclass encode format roundtrip"  "-w H10301 --fc 31 --cn 337 --ki 0 --enc none"; then break; fi
+      # Build a deterministic 143-bit "all-ones" payload to exercise the legacy max-width path.
+      ICLASS_143_BIN=
+      ICLASS_143_BIN=$(awk 'BEGIN { for (i = 0; i < 143; i++ ) { printf "1" } }')
+      if ! CheckIClassEncodeRoundTrip "hf iclass encode bin roundtrip"     "--bin 10001111100000001010100011 --ki 0 --enc none" 26; then break; fi
+      if ! CheckIClassEncodeRoundTrip "hf iclass encode bin 143-bit roundtrip" "--bin $ICLASS_143_BIN --ki 0 --enc none" 143; then break; fi
+      if ! CheckIClassEncodeRoundTrip "hf iclass encode raw roundtrip"     "--raw 063E02A3 --ki 0 --enc none" 26; then break; fi
+      if ! CheckIClassEncodeRoundTrip "hf iclass encode new roundtrip"     "--new 068F80A8C0 --ki 0 --enc none" 26; then break; fi
+      if ! CheckIClassEncodeRoundTrip "hf iclass encode format roundtrip"  "-w H10301 --fc 31 --cn 337 --ki 0 --enc none" 26; then break; fi
     fi
   
   echo -e "\n------------------------------------------------------------"
