@@ -351,7 +351,7 @@ function CheckIClassEncodeRoundTrip() {
   start=$(date +%s)
   TIMEINFO=""
 
-  local ENCODE_CMD="$PM3BIN -c 'hf iclass encode -v --ki 0 $ENCODE_ARGS'"
+  local ENCODE_CMD="$PM3BIN -c 'hf iclass encode -v $ENCODE_ARGS'"
   local ENCODE_OUTPUT
   ENCODE_OUTPUT=$(eval "$ENCODE_CMD" 2>&1)
 
