@@ -2134,7 +2134,7 @@ void ReaderIso15693(iso15_card_select_t *p_card) {
 // When SIM: initialize the Proxmark3 as ISO15693 tag
 void Iso15693InitTag(void) {
 
-    FpgaDownloadAndGo(FPGA_BITSTREAM_HF_15);
+    FpgaDownloadAndGo_keep_EM(FPGA_BITSTREAM_HF_15);
 
     // Start from off (no field generated)
     FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);

@@ -450,6 +450,7 @@ while true; do
       if ! CheckExecute "hf iclass emu reader des"    "$PM3CMD -c 'hf iclass tagsim -w H10301 --fc 31 --cn 337 --enc des' 2>&1" "Uploaded .* bytes to emulator memory"; then break; fi
       WaitForEnter "PRESS ENTER TO START ICLASS 2K3DES SIM, PRESENT THE PM3 TO ANOTHER READER, CONFIRM: iCLASS H10301 FC 31 CN 337, THEN PRESS THE PM3 BUTTON TO STOP SIM"
       if ! CheckExecute "hf iclass emu reader 2k3des" "$PM3CMD -c 'hf iclass tagsim -w H10301 --fc 31 --cn 337 --enc 2k3des' 2>&1" "Uploaded .* bytes to emulator memory"; then break; fi
+      if ! CheckExecute "hf iclass sim preserves emu" "$PM3CMD -c 'hf iclass eview -s 80' 2>&1 | LC_ALL=C tr -cd '\11\12\15\40-\176' | tr '\n' ' '" "0/0x00.*BD 0C 60 10 F7 FF 12 E0.*6/0x06.*03 03 03 03 00 03 E0 17.*7/0x07.*10 A1 45 91 9E D1 6F 50"; then break; fi
     fi
   
   echo -e "\n------------------------------------------------------------"
