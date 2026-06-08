@@ -13,6 +13,7 @@ TESTHIDWIEGAND=false
 TESTMFHIDENCODE=false
 TESTICLASSREADER=false
 TESTICLASSEMU=false
+TESTICLASSENCODEEMU=false
 NEED_MF_HID_ENCODE_WIPE=false
 TESTMANUAL=false
 
@@ -22,7 +23,7 @@ while (( "$#" )); do
   case "$1" in
     -h|--help)
       echo """
-Usage: $0 [--pm3bin /path/to/pm3] [--pm3port /dev/tty...] [desfire_value|hid_wiegand|mf_hid_encode|iclass_emu|iclass_reader]
+Usage: $0 [--pm3bin /path/to/pm3] [--pm3port /dev/tty...] [desfire_value|hid_wiegand|mf_hid_encode|iclass_emu|iclass_reader|iclass_encode_emu]
     --pm3bin ...:    Specify path to pm3 binary to test
     --pm3port ...:   Specify serial port for client/proxmark3
     --manual ...:    Pause after successful online LF HID clone/read checks for external reader verification
@@ -31,6 +32,8 @@ Usage: $0 [--pm3bin /path/to/pm3] [--pm3port /dev/tty...] [desfire_value|hid_wie
     mf_hid_encode:   Test MIFARE Classic HID encoding flows
     iclass_emu:      Test iCLASS emulator memory load/write/read flows
     iclass_reader:   Load iCLASS HID credentials into emulator memory for external reader verification
+    iclass_encode_emu:
+                     Test iCLASS long PACS encoding in emulator memory
     You must specify a test target - no default 'all' for online tests
 """
       exit 0
@@ -80,6 +83,11 @@ Usage: $0 [--pm3bin /path/to/pm3] [--pm3port /dev/tty...] [desfire_value|hid_wie
     iclass_emu)
       TESTALL=false
       TESTICLASSEMU=true
+      shift
+      ;;
+    iclass_encode_emu)
+      TESTALL=false
+      TESTICLASSENCODEEMU=true
       shift
       ;;
     -*|--*=) # unsupported flags
@@ -365,7 +373,7 @@ if command -v git >/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2
 fi
 
 # Check that user specified a test
-if [ "$TESTDESFIREVALUE" = false ] && [ "$TESTHIDWIEGAND" = false ] && [ "$TESTMFHIDENCODE" = false ] && [ "$TESTICLASSEMU" = false ] && [ "$TESTICLASSREADER" = false ]; then
+if [ "$TESTDESFIREVALUE" = false ] && [ "$TESTHIDWIEGAND" = false ] && [ "$TESTMFHIDENCODE" = false ] && [ "$TESTICLASSEMU" = false ] && [ "$TESTICLASSREADER" = false ] && [ "$TESTICLASSENCODEEMU" = false ]; then
   echo "Error: You must specify a test target. Use -h for help."
   exit 1
 fi
@@ -428,6 +436,26 @@ while true; do
       echo -e "\n${C_BLUE}Testing iCLASS emulator memory${C_NC} ${PM3BIN:=./pm3}"
       if ! CheckFileExist "pm3 exists"               "$PM3BIN"; then break; fi
       if ! CheckExecute "hf iclass esetblk preserves emu" "$PM3BIN -c 'hf iclass eload -f traces/iclass/hf-iclass-dump.json; hw fpgaoff; hf iclass esetblk --blk 7 -d A55AC33C9669F00F; hf iclass eview -s 64' 2>&1 | LC_ALL=C tr -cd '\11\12\15\40-\176' | tr '\n' ' '" "0/0x00.*6D C2 5B 15 FE FF 12 E0.*7/0x07.*A5 5A C3 3C 96 69 F0 0F"; then break; fi
+    fi
+
+    if $TESTICLASSENCODEEMU; then
+      echo -e "\n${C_BLUE}Testing iCLASS encode emulator fixtures${C_NC} ${PM3BIN:=./pm3}"
+      if ! CheckFileExist "pm3 exists"               "$PM3BIN"; then break; fi
+
+      ICLASS_LONG_128="$(printf '10%.0s' {1..64})"
+      ICLASS_LONG_144="$(printf '10%.0s' {1..72})"
+      ICLASS_LONG_145="${ICLASS_LONG_144}1"
+      ICLASS_SHORT_32="$(printf '01%.0s' {1..16})"
+      ICLASS_LONG_NEW="00AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ICLASS_LONG_NEW_144="00AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+      if ! CheckExecute "hf iclass encode 128-bit bin" "$PM3BIN -c 'hf iclass encode --bin $ICLASS_LONG_128 --enc none --emu; hf iclass eview'" "7/0x07.*AA AA AA AA AA AA AA AA"; then break; fi
+      if ! CheckExecute "hf iclass encode 128-bit new" "$PM3BIN -c 'hf iclass encode --new $ICLASS_LONG_NEW --enc none --emu; hf iclass eview'" "9/0x09.*00 00 00 00 00 00 00 01"; then break; fi
+      if ! CheckExecute "hf iclass encode formatted input" "$PM3BIN -c 'hf iclass encode -w H10301 --fc 31 --cn 337 --enc none --emu; hf iclass eview'" "7/0x07.*00 00 00 00 06 3E 02 A3"; then break; fi
+      if ! CheckExecute "hf iclass encode 144-bit bin" "$PM3BIN -c 'hf iclass encode --bin $ICLASS_LONG_144 --enc none --emu; hf iclass eview'" "6/0x06.*03 03 03 03 00 03 60 14"; then break; fi
+      if ! CheckExecute "hf iclass encode 144-bit new" "$PM3BIN -c 'hf iclass encode --new $ICLASS_LONG_NEW_144 --enc none --emu; hf iclass eview'" "6/0x06.*03 03 03 03 00 03 60 14"; then break; fi
+      if ! CheckExecute "hf iclass encode 145-bit reject" "$PM3BIN -c 'hf iclass encode --bin $ICLASS_LONG_145 --enc none --emu' 2>&1" "Binary wiegand string must be 144 bits or less"; then break; fi
+      if ! CheckExecute "hf iclass encode rewrite clears" "$PM3BIN -c 'hf iclass encode --bin $ICLASS_LONG_128 --enc none --emu; hf iclass encode --bin $ICLASS_SHORT_32 --enc none --emu; hf iclass eview'" "8/0x08.*00 00 00 00 00 00 00 00"; then break; fi
     fi
 
     if $TESTICLASSREADER; then

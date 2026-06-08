@@ -508,6 +508,14 @@ while true; do
       if ! CheckExecute "hf iclass encrypt des"           "$CLIENTBIN -c 'hf iclass encrypt -d 00000000063E02A3 --enc des -k $ICLASS_TRANSPORT_KEY'" "encrypted\\.\\.\\. D50D3FC66AF7E0F3"; then break; fi
       if ! CheckExecute "hf iclass decrypt des"           "$CLIENTBIN -c 'hf iclass decrypt -d D50D3FC66AF7E0F3 --enc des -k $ICLASS_TRANSPORT_KEY'" "plain\\.\\.\\.\\.\\.\\.\\. 00000000063E02A3"; then break; fi
       if ! CheckExecute "hf iclass view dump"             "$CLIENTBIN -c 'hf iclass view -f traces/iclass/hf-iclass-dump.json'" "7/0x07 \\| 78 36 02 A2 28 30 10 E8"; then break; fi
+      if ! CheckExecute "hf iclass view long legacy PACS" "$CLIENTBIN -c 'hf iclass view -f traces/iclass/hf-iclass-legacy-pacs-128.json'" "Binary.*128"; then break; fi
+      if ! CheckExecute "hf iclass view long decode cap"  "$CLIENTBIN -c 'hf iclass view -f traces/iclass/hf-iclass-legacy-pacs-128.json'" "exceeds 96 bits"; then break; fi
+      if ! CheckExecute "hf iclass encode bin input"      "$CLIENTBIN -c 'hf iclass encode --bin 10001111100000001010100011 --enc none --emu -v' 2>&1" "Block 7/0x07 -> 00000000063E02A3"; then break; fi
+      if ! CheckExecute "hf iclass encode new input"      "$CLIENTBIN -c 'hf iclass encode --new 068F80A8C0 --enc none --emu -v' 2>&1" "Block 7/0x07 -> 00000000063E02A3"; then break; fi
+      if ! CheckExecute "hf iclass encode formatted input" "$CLIENTBIN -c 'hf iclass encode -w H10301 --fc 31 --cn 337 --enc none --emu -v' 2>&1" "Block 7/0x07 -> 00000000063E02A3"; then break; fi
+      if ! CheckExecute "hf iclass encode 144-bit bin"    "PAT=\$(printf '10%.0s' {1..72}); $CLIENTBIN -c \"hf iclass encode --bin \$PAT --enc none --emu -v\" 2>&1" "Block 6/0x06 -> 0303030300036014"; then break; fi
+      if ! CheckExecute "hf iclass encode 144-bit new"    "$CLIENTBIN -c 'hf iclass encode --new 00AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA --enc none --emu -v' 2>&1" "Block 6/0x06 -> 0303030300036014"; then break; fi
+      if ! CheckExecute "hf iclass encode 145-bit reject" "PAT=\$(printf '10%.0s' {1..72})1; $CLIENTBIN -c \"hf iclass encode --bin \$PAT --enc none --emu -v\" 2>&1" "Binary wiegand string must be 144 bits or less"; then break; fi
       if ! CheckExecute "hf iclass view SE AIA SIO block" "$CLIENTBIN -c 'hf iclass view -f traces/iclass/hf-iclass-se-weird.json'" "SIO / SE"; then break; fi
       if ! CheckExecute "hf iclass view SE AIA SIO raw"   "$CLIENTBIN -c 'hf iclass view -f traces/iclass/hf-iclass-se-weird.json'" "SIO - RAW"; then break; fi
       if ! CheckExecute "hf iclass decrypt dump"          "$CLIENTBIN -c 'hf iclass decrypt -f traces/iclass/hf-iclass-dump.json --ns -k $ICLASS_TRANSPORT_KEY'" "C1k48s.*FC: 69  CN: 69420  parity \\( ok \\)"; then break; fi

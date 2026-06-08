@@ -517,11 +517,11 @@ int do_iclass_simulation(int simulationMode, uint8_t *reader_mac_buf) {
                 if (rx.cmd == CMD_HF_ICLASS_EML_MEMSET) {
                     struct p {
                         uint16_t offset;
-                        uint16_t plen;
+                        uint16_t len;
                         uint8_t  data[];
                     } PACKED;
                     struct p *payload = (struct p *) rx.data.asBytes;
-                    emlSet(payload->data, payload->offset, payload->plen);
+                    emlSet(payload->data, payload->offset, payload->len);
                 } else {
                     exit_loop = true;
                     break;

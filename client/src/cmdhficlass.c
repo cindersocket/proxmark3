@@ -27,6 +27,7 @@
 #include "cliparser.h"
 #include "cmdparser.h"              // command_t
 #include "commonutil.h"             // ARRAYLEN
+#include "crc32.h"
 #include "cmdtrace.h"
 #include "util_posix.h"
 #include "comms.h"
@@ -285,6 +286,45 @@ static inline uint32_t leadingzeros(uint64_t a) {
 #else
     return 0;
 #endif
+}
+
+static int hficlass_encode_wiegand_binstr(const char *binstr, uint8_t *credential) {
+    if (binstr == NULL || credential == NULL) {
+        return PM3_EINVARG;
+    }
+
+    size_t bin_len = strlen(binstr);
+    if (bin_len == 0 || bin_len > 144) {
+        return PM3_EINVARG;
+    }
+
+    char pacs_bin[(18 * 8) + 1];
+    memset(pacs_bin, '0', sizeof(pacs_bin) - 1);
+    pacs_bin[sizeof(pacs_bin) - 1] = '\0';
+    if (bin_len < 144) {
+        pacs_bin[(18 * 8) - bin_len - 1] = '1';
+        credential[6] |= 0x80;
+    } else {
+        credential[6] &= 0x7F;
+    }
+    for (size_t i = 0; i < bin_len; i++) {
+        if (binstr[i] != '0' && binstr[i] != '1') {
+            return PM3_EINVARG;
+        }
+    }
+    memcpy(pacs_bin + ((18 * 8) - bin_len), binstr, bin_len);
+
+    uint8_t pacs[18] = {0};
+    size_t pacs_len = 0;
+    binstr_2_bytes(pacs, &pacs_len, pacs_bin);
+    if (pacs_len != sizeof(pacs)) {
+        return PM3_EINVARG;
+    }
+
+    memcpy(credential + 8, pacs + 10, PICOPASS_BLOCK_SIZE);
+    memcpy(credential + 16, pacs + 2, PICOPASS_BLOCK_SIZE);
+    memcpy(credential + 30, pacs, 2);
+    return PM3_SUCCESS;
 }
 
 static void iclass_upload_emul(uint8_t *d, uint16_t n, uint16_t offset, uint16_t *bytes_sent) {
@@ -1316,9 +1356,10 @@ static int CmdHFiClassTagSim(const char *Cmd) {
     card.IssueLevel    = arg_get_u32_def(ctx, 4, 0);
 
     // --- binary string
-    uint8_t bin[65] = {0};
+    uint8_t bin[sizeof(((wiegand_input_t *)0)->binstr) + 1] = {0};
     int bin_len = sizeof(bin) - 1;
     CLIGetStrWithReturn(ctx, 5, bin, &bin_len);
+    bin[bin_len] = '\0';
 
     // --- debit key
     int kd_len = 0;
@@ -1370,8 +1411,8 @@ static int CmdHFiClassTagSim(const char *Cmd) {
         return PM3_EINVARG;
     }
 
-    if (bin_len > 64) {
-        PrintAndLogEx(ERR, "Binary wiegand string must be at most 64 bits");
+    if (bin_len >= (int)sizeof(((wiegand_input_t *)0)->binstr)) {
+        PrintAndLogEx(ERR, "Binary wiegand string must be %zu bits or less", sizeof(bin) - 2U);
         return PM3_EINVARG;
     }
 
@@ -1462,9 +1503,15 @@ static int CmdHFiClassTagSim(const char *Cmd) {
     uint8_t dump[32 * PICOPASS_BLOCK_SIZE];
     memset(dump, 0, sizeof(dump));
 
-    // Block 0: CSN — auto-generate from FC/CN if not provided
+    // Block 0: CSN — auto-generate if not provided
     if (have_custom_csn) {
         memcpy(dump, csn, 8);
+    } else if (bin_len > 0) {
+        crc32_ex(bin, bin_len, dump);
+        dump[4] = 0xF7;
+        dump[5] = 0xFF;
+        dump[6] = 0x12;
+        dump[7] = 0xE0;
     } else {
         uint32_t fc = card.FacilityCode;
         uint32_t cn = card.CardNumber;
@@ -1515,45 +1562,31 @@ static int CmdHFiClassTagSim(const char *Cmd) {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // block 9: padding
     };
 
+    wiegand_input_t input;
+    memset(&input, 0, sizeof(input));
     if (bin_len > 0) {
-        // raw binary string path
-        uint8_t data[8];
-        memset(data, 0, sizeof(data));
-        BitstreamOut_t bout = {data, 0, 0};
-        for (int i = 0; i < 64 - bin_len - 1; i++)
-            pushBit(&bout, 0);
-        pushBit(&bout, 1); // sentinel bit
-        for (int i = 0; i < bin_len; i++) {
-            char c = (char)bin[i];
-            if (c == '1')       pushBit(&bout, 1);
-            else if (c == '0')  pushBit(&bout, 0);
+        int res = wiegand_pack_from_plain_bin((char *)bin, &input);
+        if (res != PM3_SUCCESS) {
+            PrintAndLogEx(ERR, "Failed to encode HID input");
+            return res;
         }
-        memcpy(credential + 8, data, 8);
     } else {
-        // wiegand format path
-        wiegand_message_t packed;
-        memset(&packed, 0, sizeof(wiegand_message_t));
-
         int format_idx = HIDFindCardFormat(format);
         if (format_idx == -1) {
             PrintAndLogEx(WARNING, "Unknown wiegand format: " _YELLOW_("%s"), format);
             return PM3_EINVARG;
         }
 
-        if (HIDPack(format_idx, &card, &packed, false) == false) {
+        int res = wiegand_pack_from_formatted(format_idx, &card, false, &input);
+        if (res != PM3_SUCCESS) {
             PrintAndLogEx(WARNING, "Card data could not be encoded in the selected format");
-            return PM3_ESOFT;
+            return res;
         }
+    }
 
-        packed.Length++;
-        set_bit_by_position(&packed, true, 0);
-
-#ifdef HOST_LITTLE_ENDIAN
-        packed.Mid = BSWAP_32(packed.Mid);
-        packed.Bot = BSWAP_32(packed.Bot);
-#endif
-        memcpy(credential + 8,  &packed.Mid, sizeof(packed.Mid));
-        memcpy(credential + 12, &packed.Bot, sizeof(packed.Bot));
+    if (hficlass_encode_wiegand_binstr(input.binstr, credential) != PM3_SUCCESS) {
+        PrintAndLogEx(ERR, "Encoded Wiegand payload is too large to fit in the iCLASS credential");
+        return PM3_EINVARG;
     }
 
     iclass_set_transport_mode(credential, enc_mode);
@@ -1600,7 +1633,7 @@ static int CmdHFiClassTagSim(const char *Cmd) {
     }
 
     clearCommandBuffer();
-    SendCommandMIX(CMD_HF_ICLASS_SIMULATE, ICLASS_SIM_MODE_FULL_LIVE, 0, 1, csn, 8);
+    SendCommandMIX(CMD_HF_ICLASS_SIMULATE, bin_len == 0 ? ICLASS_SIM_MODE_FULL_LIVE : ICLASS_SIM_MODE_FULL, 0, 1, csn, 8);
 
     // --- live FC/CN navigation (wiegand mode only; binary mode has no FC/CN to adjust)
     if (bin_len == 0) {
@@ -2100,8 +2133,12 @@ static bool iclass_detect_new_pacs(uint8_t *d) {
 static int iclass_decode_credentials_new_pacs(uint8_t *d) {
 
     uint8_t offset = 0;
-    while (d[offset] == 0 && (offset < PICOPASS_BLOCK_SIZE / 2)) {
+    while (offset < (PICOPASS_BLOCK_SIZE / 2) && d[offset + 1] != 0xA6) {
         offset++;
+    }
+    if (offset >= (PICOPASS_BLOCK_SIZE / 2)) {
+        PrintAndLogEx(ERR, "Invalid new PACS payload: missing 0xA6 marker");
+        return PM3_EINVARG;
     }
 
     uint8_t pad = d[offset];
@@ -2138,7 +2175,7 @@ static int iclass_decode_credentials_new_pacs(uint8_t *d) {
     free(binstr);
 
     PrintAndLogEx(NORMAL, "");
-    PrintAndLogEx(INFO, "------------------------- " _CYAN_("SIO - Wiegand") " ----------------------------");
+    PrintAndLogEx(INFO, "---------------------- " _CYAN_("New PACS - Wiegand") " -------------------------");
     decode_wiegand(top, mid, bot, 0);
 
     return PM3_SUCCESS;
@@ -2154,56 +2191,53 @@ static void iclass_decode_credentials(uint8_t *data) {
     BLOCK79ENCRYPTION encryption = (data[(6 * PICOPASS_BLOCK_SIZE) + 7] & 0x03);
 
     uint8_t *b7 = data + (PICOPASS_BLOCK_SIZE * 7);
+    uint8_t *blocks789 = b7;
+    bool blocks789_empty = true;
+    bool blocks789_zero = true;
+    for (uint8_t i = 0; i < 3; i++) {
+        blocks789_empty &= (memcmp(blocks789 + (i * PICOPASS_BLOCK_SIZE), empty, PICOPASS_BLOCK_SIZE) == 0);
+        blocks789_zero &= (memcmp(blocks789 + (i * PICOPASS_BLOCK_SIZE), zeros, PICOPASS_BLOCK_SIZE) == 0);
+    }
+    bool has_sentinel = (data[(6 * PICOPASS_BLOCK_SIZE) + 6] & 0x80) != 0;
+    bool has_values = blocks789_empty == false && blocks789_zero == false;
+    if (has_values && (encryption == None || encryption == RFU)) {
 
-    bool has_new_pacs = iclass_detect_new_pacs(b7);
-    bool has_values = (memcmp(b7, empty, PICOPASS_BLOCK_SIZE) != 0) && (memcmp(b7, zeros, PICOPASS_BLOCK_SIZE) != 0);
-    if (has_values && encryption == None) {
+        PrintAndLogEx(INFO, "--------------------- " _CYAN_("Legacy PACS decoder") " -----------------------");
+        uint8_t pacs[18] = {0};
+        char binstr[(sizeof(pacs) * 8) + 1] = {0};
 
-        PrintAndLogEx(INFO, "------------------------ " _CYAN_("Block 7 decoder") " --------------------------");
+        memcpy(pacs, blocks789 + 22, 2);
+        memcpy(pacs + 2, blocks789 + 8, PICOPASS_BLOCK_SIZE);
+        memcpy(pacs + 10, blocks789, PICOPASS_BLOCK_SIZE);
+        bytes_2_binstr(binstr, pacs, sizeof(pacs));
 
-        // todo:  remove preamble/sentinel
-        if (has_new_pacs) {
-            iclass_decode_credentials_new_pacs(b7);
-        } else {
-            char hexstr[16 + 1] = {0};
-            hex_to_buffer((uint8_t *)hexstr, b7, PICOPASS_BLOCK_SIZE, sizeof(hexstr) - 1, 0, 0, true);
-
-            uint32_t top = 0, mid = 0, bot = 0;
-            hexstring_to_u96(&top, &mid, &bot, hexstr);
-
-            char binstr[64 + 1];
-            hextobinstring(binstr, hexstr);
-            char *pbin = binstr;
-            // Strip leading zeros
-            while (strlen(pbin) && *(++pbin) == '0');
-
-            size_t binlen = strlen(pbin);
-
-            // Check if we have a sentinel bit (leading '1' that makes length one more than common formats)
-            // Common formats: 26, 30, 33, 34, 35, 36, 37, 46, 48
-            // If we have 27, 31, 34, 35, 36, 37, 38, 47, 49 bits and it starts with '1',
-            // it's likely a sentinel bit that should be stripped
-            if (binlen > 0 && pbin[0] == '1' &&
-                    (binlen == 27 || binlen == 31 || binlen == 34 || binlen == 35 ||
-                     binlen == 36 || binlen == 37 || binlen == 38 || binlen == 47 || binlen == 49)) {
-                // Strip the sentinel bit by recreating u96 from binary string without leading '1'
-                char *corrected_bin = pbin + 1; // Skip the leading '1'
-                size_t corrected_len = strlen(corrected_bin);
-
-                // Recreate u96 values from corrected binary string
-                top = 0;
-                mid = 0;
-                bot = 0;
-                binstring_to_u96(&top, &mid, &bot, corrected_bin);
-
-                pbin = corrected_bin;
-                binlen = corrected_len;
+        char *pbin = binstr;
+        if (has_sentinel) {
+            pbin = strchr(binstr, '1');
+            if (pbin == NULL || pbin[1] == '\0') {
+                PrintAndLogEx(ERR, "Invalid legacy PACS payload: missing sentinel bit");
+                return;
             }
+            pbin++;
+        }
 
-            PrintAndLogEx(SUCCESS, "Bin... " _GREEN_("%s") " ( %zu )", pbin, binlen);
-            PrintAndLogEx(NORMAL, "");
-            // Use the corrected length (without sentinel) for decoding
-            decode_wiegand(top, mid, bot, (int)binlen);
+        size_t binlen = strlen(pbin);
+        PrintAndLogEx(SUCCESS, "Binary... " _GREEN_("%s") " ( %zu )", pbin, binlen);
+
+        if (binlen > 96) {
+            PrintAndLogEx(INFO, "Recovered legacy PACS payload exceeds 96 bits; format decode is not supported above 96 bits.");
+            return;
+        }
+
+        uint32_t top = 0, mid = 0, bot = 0;
+        if (binstring_to_u96(&top, &mid, &bot, pbin) != (int)binlen) {
+            PrintAndLogEx(ERR, "Binary string contains none <0|1> chars");
+            return;
+        }
+
+        PrintAndLogEx(NORMAL, "");
+        if (decode_wiegand(top, mid, bot, (int)binlen) == false) {
+            PrintAndLogEx(INFO, "No matching Wiegand formats found in the right-aligned legacy PACS payload.");
         }
     }
 }
@@ -7468,10 +7502,11 @@ static int CmdHFiClassEncode(const char *Cmd) {
     CLIParserContext *ctx;
     CLIParserInit(&ctx, "hf iclass encode",
                   "Encode binary wiegand to block 7,8,9\n"
-                  "Use either --bin or --wiegand/--fc/--cn\n"
+                  "Use one of --bin, --new, or --wiegand/--fc/--cn\n"
                   "Authenticate with either --ki (key slot index) or -k/--key (raw 8-byte hex key)\n"
                   "When using emulator you have to first load a credential into emulator memory",
                   "hf iclass encode --bin 10001111100000001010100011 --ki 0            -> FC 31 CN 337 (H10301)\n"
+                  "hf iclass encode --new 068F80A8C0 --emu\n"
                   "hf iclass encode -w H10301 --fc 31 --cn 337 --ki 0                  -> FC 31 CN 337 (H10301)\n"
                   "hf iclass encode -w H10301 --fc 31 --cn 337 -k 0102030405060708     -> authenticate with  hex key\n"
                   "hf iclass encode --bin 10001111100000001010100011 --ki 0 --elite    -> FC 31 CN 337 (H10301), writing w elite key\n"
@@ -7495,14 +7530,19 @@ static int CmdHFiClassEncode(const char *Cmd) {
         arg_lit0(NULL, "shallow", "use shallow (ASK) reader modulation instead of OOK"),
         arg_lit0("v", NULL, "verbose (print encoded blocks)"),
         arg_str0(NULL, "enc", "[none|des|2k3des]", "transport encryption mode"),
+        arg_str0(NULL, "new", "<hex>", "new ASN.1 PACS hex from `wiegand encode --new`"),
         arg_param_end
     };
     CLIExecWithReturn(ctx, Cmd, argtable, false);
 
-    // can only do one block of 8 bytes currently.  There are room for two blocks in the specs.
-    uint8_t bin[65] = {0};
+    uint8_t bin[sizeof(((wiegand_input_t *)0)->binstr) + 1] = {0};
     int bin_len = sizeof(bin) - 1; // CLIGetStrWithReturn does not guarantee string to be null-terminated
     CLIGetStrWithReturn(ctx, 1, bin, &bin_len);
+    bin[bin_len] = '\0';
+
+    uint8_t new_pacs[19] = {0};
+    int new_pacs_len = 0;
+    int parse_res = CLIParamHexToBuf(arg_get_str(ctx, 16), new_pacs, sizeof(new_pacs), &new_pacs_len);
 
     int key_nr = arg_get_int_def(ctx, 2, -1);
 
@@ -7591,6 +7631,11 @@ static int CmdHFiClassEncode(const char *Cmd) {
         return PM3_EINVARG;
     }
 
+    if (parse_res) {
+        PrintAndLogEx(ERR, "Error parsing hex input");
+        return PM3_EINVARG;
+    }
+
     if (enc_key_len > 0) {
         if (enc_key_len != 16) {
             PrintAndLogEx(ERR, "Transport key must be 16 hex bytes (32 HEX characters)");
@@ -7603,13 +7648,27 @@ static int CmdHFiClassEncode(const char *Cmd) {
         PrintAndLogEx(WARNING, "Transport mode marker is none; --enckey will be ignored.");
     }
 
-    if (bin_len > 64) {
-        PrintAndLogEx(ERR, "Binary wiegand string must be less than 64 bits");
+    if (bin_len >= (int)sizeof(((wiegand_input_t *)0)->binstr)) {
+        PrintAndLogEx(ERR, "Binary wiegand string must be %zu bits or less", sizeof(bin) - 2U);
         return PM3_EINVARG;
     }
 
-    if (bin_len == 0 && card.FacilityCode == 0 && card.CardNumber == 0) {
-        PrintAndLogEx(ERR, "Must provide either --cn/--fc or --bin");
+    int input_modes = 0;
+    input_modes += (bin_len > 0);
+    input_modes += (new_pacs_len > 0);
+    input_modes += (format_len > 0 || card.FacilityCode != 0 || card.CardNumber != 0 || card.IssueLevel != 0);
+    if (input_modes != 1) {
+        PrintAndLogEx(ERR, "Use exactly one of `--bin`, `--new`, or `--wiegand/--fc/--cn[/--issue]`");
+        return PM3_EINVARG;
+    }
+
+    if (format_len > 0 && card.FacilityCode == 0 && card.CardNumber == 0 && card.IssueLevel == 0) {
+        PrintAndLogEx(ERR, "`--wiegand` requires `--fc`, `--cn`, or `--issue`");
+        return PM3_EINVARG;
+    }
+
+    if (format_len == 0 && (card.FacilityCode != 0 || card.CardNumber != 0 || card.IssueLevel != 0)) {
+        PrintAndLogEx(ERR, "`--fc`, `--cn`, and `--issue` require `--wiegand`");
         return PM3_EINVARG;
     }
 
@@ -7644,60 +7703,31 @@ static int CmdHFiClassEncode(const char *Cmd) {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
 
-    uint8_t data[8];
-    memset(data, 0, sizeof(data));
-    BitstreamOut_t bout = {data, 0, 0 };
-
-    for (int i = 0; i < 64 - bin_len - 1; i++) {
-        pushBit(&bout, 0);
-    }
-    // add binary sentinel bit.
-    pushBit(&bout, 1);
-
-    // convert binary string to hex bytes
-    for (int i = 0; i < bin_len; i++) {
-        char c = bin[i];
-        if (c == '1')
-            pushBit(&bout, 1);
-        else if (c == '0')
-            pushBit(&bout, 0);
-        else {
-            PrintAndLogEx(WARNING, "Ignoring '%c'", c);
-        }
-    }
+    wiegand_input_t input;
+    memset(&input, 0, sizeof(input));
+    int res = PM3_SUCCESS;
 
     if (bin_len) {
-        memcpy(credential + 8, data, sizeof(data));
+        res = wiegand_pack_from_plain_bin((char *)bin, &input);
+    } else if (new_pacs_len) {
+        res = wiegand_pack_from_new_pacs(new_pacs, new_pacs_len, &input);
     } else {
-        wiegand_message_t packed;
-        memset(&packed, 0, sizeof(wiegand_message_t));
-
         int format_idx = HIDFindCardFormat(format);
         if (format_idx == -1) {
             PrintAndLogEx(WARNING, "Unknown format: " _YELLOW_("%s"), format);
             return PM3_EINVARG;
         }
 
-        if (HIDPack(format_idx, &card, &packed, false) == false) {
-            PrintAndLogEx(WARNING, "The card data could not be encoded in the selected format.");
-            return PM3_ESOFT;
-        }
+        res = wiegand_pack_from_formatted(format_idx, &card, false, &input);
+    }
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(ERR, "Failed to encode HID input");
+        return res;
+    }
 
-        // iceman: only for formats w length smaller than 37.
-        // Needs a check.
-
-        // increase length to allow setting bit just above real data
-        packed.Length++;
-        // Set sentinel bit
-        set_bit_by_position(&packed, true, 0);
-
-#ifdef HOST_LITTLE_ENDIAN
-        packed.Mid = BSWAP_32(packed.Mid);
-        packed.Bot = BSWAP_32(packed.Bot);
-#endif
-
-        memcpy(credential + 8, &packed.Mid, sizeof(packed.Mid));
-        memcpy(credential + 12, &packed.Bot, sizeof(packed.Bot));
+    if (hficlass_encode_wiegand_binstr(input.binstr, credential) != PM3_SUCCESS) {
+        PrintAndLogEx(ERR, "Encoded Wiegand payload is too large to fit in the iCLASS credential");
+        return PM3_EINVARG;
     }
 
     iclass_set_transport_mode(credential, (BLOCK79ENCRYPTION)transport_mode);
